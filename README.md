@@ -1,5 +1,7 @@
 # 6bBotAPI
 
+> Original Work: https://github.com/ClapFy/6bBotAPI
+
 Mineflayer control system for the 6b6t anarchy server. Offline-account join, stored `/login`, two server-lobby portals, auto-rejoin, a CLI with tab completion, and an HTTP/WebSocket control API you can plug other UIs into.
 
 ## Setup
@@ -104,3 +106,8 @@ RPC actions: see `GET /v1/catalog`. Common ones include `join`, `leave`, `contro
 4. Offline accounts are sent to an End lobby island, then must walk **two server nether portals** (End island, then overworld sky lobby). The first lobby portal is a normal vanilla nether portal (2×3 interior). Decorative portal walls are ignored. Real nether portals in survival are ignored.
 5. Lobby portal transfers go through Velocity; the bot pauses physics during that configuration phase so it is not kicked.
 6. If kicked, reconnect. If a lobby portal is missing, wait a minute and scan again.
+
+## Documentation
+
+- [Contributing](CONTRIBUTING.md)
+- [Code of Conducts](docs/CODE_OF_CONDUCT.md)
