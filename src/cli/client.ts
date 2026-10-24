@@ -1,4 +1,4 @@
-import type { KrynConfig } from "../config.ts";
+import type { FractalConfig } from "../config.ts";
 import type { ControlRequest, ControlResponse } from "../api/types.ts";
 
 export class ControlClient {
@@ -42,6 +42,6 @@ export class ControlClient {
   }
 }
 
-export function controlClient(config: KrynConfig): ControlClient {
+export function controlClient(config: FractalConfig): ControlClient {
   return new ControlClient(config.controlHost, config.controlPort, config.controlToken);
 }

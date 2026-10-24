@@ -54,4 +54,4 @@ export class Logger {
   }
 }
 
-export const log = new Logger("krynbot");
+export const log = new Logger("fractalbot");

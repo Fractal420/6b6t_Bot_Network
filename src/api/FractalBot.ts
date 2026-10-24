@@ -1,0 +1,870 @@
+import { EventEmitter } from "node:events";
+import os from "node:os";
+import mineflayer, { type Bot } from "mineflayer";
+import { goals, pathfinder } from "../minecraft/pathfinder.ts";
+import type { FractalConfig } from "../config.ts";
+import { log } from "../logger.ts";
+import { attachAnarchyMod } from "../minecraft/anarchyMod.ts";
+import { attachAuth, type AuthController } from "../minecraft/auth.ts";
+import { attachProtocolCompat } from "../minecraft/protocolCompat.ts";
+import { attachVelocityTransfer } from "../minecraft/velocityTransfer.ts";
+import { sendCommand } from "../minecraft/command.ts";
+import { redactSecrets } from "./security.ts";
+import { createPortalNavigator, type PortalNavigator } from "../minecraft/lobby/navigator.ts";
+import { classifyWorld, isLobbyLike, isMainWorld } from "../minecraft/lobby/worldKind.ts";
+import { dumpWorld, persistDump, topBlockCounts } from "../minecraft/probe.ts";
+import { findPortalBlocks } from "../minecraft/lobby/portals.ts";
+import { clampVoxelRadius, sampleVoxels } from "../minecraft/voxels.ts";
+import {
+  controlSnapshot,
+  cursorBlock,
+  cursorEntity,
+  faceVector,
+  listEntities,
+  resolveBlock,
+  snapshotBlockAt,
+} from "../minecraft/view.ts";
+import type {
+  BotErrorInfo,
+  BotErrorSource,
+  BotPhase,
+  BotStatus,
+  BlockInfo,
+  ControlState,
+  EntityInfo,
+  EquipmentDest,
+  InventorySlot,
+  InventoryView,
+  InvCommand,
+  JoinOptions,
+  FractalBotEvents,
+  LookInfo,
+  PlaceFace,
+  PlayerInfo,
+  Surroundings,
+  Vec3Like,
+  VoxelField,
+  WorldDump,
+  WorldKind,
+} from "./types.ts";
+
+export class FractalBot extends EventEmitter {
+  private bot: Bot | null = null;
+  private auth: AuthController | null = null;
+  private navigator: PortalNavigator | null = null;
+  private phase: BotPhase = "idle";
+  private worldKind: WorldKind = "unknown";
+  private authenticated = false;
+  private serverPortalsEntered = 0;
+  private autoReconnect = true;
+  private autoLobby = true;
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private startedAt = 0;
+  private lastKick?: string;
+  private lastError?: BotErrorInfo;
+  private faultJoinGeneration = -1;
+  private reachedLogin = false;
+  private lastChat?: string;
+  private joinGeneration = 0;
+  private leaving = false;
+  private password: string;
+  private invChain: Promise<unknown> = Promise.resolve();
+  private jumpTimer: NodeJS.Timeout | null = null;
+
+  constructor(private config: FractalConfig) {
+    super();
+    this.password = config.password;
+    this.setMaxListeners(50);
+  }
+
+  override on<U extends keyof FractalBotEvents>(event: U, listener: FractalBotEvents[U]): this {
+    super.on(event, listener as (...args: unknown[]) => void);
+    return this;
+  }
+
+  get raw(): Bot | null {
+    return this.bot;
+  }
+
+  getStatus(): BotStatus {
+    const bot = this.bot;
+    return {
+      phase: this.phase,
+      connected: Boolean(bot),
+      username: this.config.username,
+      host: this.config.host,
+      port: this.config.port,
+      version: bot?.version,
+      dimension: bot?.game?.dimension,
+      worldKind: this.worldKind,
+      authenticated: this.authenticated,
+      serverPortalsEntered: this.serverPortalsEntered,
+      requiredServerPortals: this.config.requiredServerPortals,
+      position: bot?.entity?.position ? roundVec(bot.entity.position) : undefined,
+      yaw: bot?.entity?.yaw,
+      pitch: bot?.entity?.pitch,
+      onGround: bot?.entity?.onGround,
+      gameMode: bot?.game?.gameMode,
+      control: controlSnapshot(bot),
+      health: bot?.health,
+      food: bot?.food,
+      ping: bot?.player?.ping,
+      players: bot ? Object.keys(bot.players).length : 0,
+      uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
+      lastKick: this.lastKick,
+      lastError: this.lastError ?? null,
+      lastChat: this.lastChat,
+      autoReconnect: this.autoReconnect,
+      autoLobby: this.autoLobby,
+      huntingPortal: Boolean(this.navigator?.hunting),
+    };
+  }
+
+  async join(options: JoinOptions = {}): Promise<void> {
+    if (options.host) this.config.host = options.host;
+    if (options.port) this.config.port = options.port;
+    if (options.username) this.config.username = options.username;
+    if (options.password) {
+      this.password = options.password;
+      this.config.password = options.password;
+    }
+    if (options.version) this.config.version = options.version;
+    if (options.autoReconnect !== undefined) this.autoReconnect = options.autoReconnect;
+    if (options.autoLobby !== undefined) this.autoLobby = options.autoLobby;
+
+    this.leaving = false;
+    this.clearReconnect();
+    await this.disconnectInternal("rejoin");
+    this.connect();
+  }
+
+  async leave(reason = "leave"): Promise<void> {
+    this.leaving = true;
+    this.autoReconnect = false;
+    this.clearReconnect();
+    await this.disconnectInternal(reason);
+    this.setPhase("idle");
+  }
+
+  async reconnect(): Promise<void> {
+    this.leaving = false;
+    await this.join();
+  }
+
+  chat(message: string): void {
+    this.requireBot().chat(message);
+  }
+
+  runCommand(command: string): void {
+    sendCommand(this.requireBot(), command);
+  }
+
+  goto(x: number, y: number, z: number, range = 1): void {
+    const bot = this.requireBot();
+    bot.pathfinder.setGoal(new goals.GoalNear(x, y, z, range));
+  }
+
+  async lookAt(x: number, y: number, z: number): Promise<void> {
+    const bot = this.requireBot();
+    const { Vec3 } = await import("vec3");
+    await bot.lookAt(new Vec3(x, y, z));
+  }
+
+  async look(opts: { yaw?: number; pitch?: number; x?: number; y?: number; z?: number; force?: boolean }): Promise<LookInfo> {
+    if ([opts.x, opts.y, opts.z].every((n) => typeof n === "number" && Number.isFinite(n))) {
+      await this.lookAt(opts.x as number, opts.y as number, opts.z as number);
+      return this.getLook();
+    }
+    const bot = this.requireBot();
+    const yaw = opts.yaw ?? bot.entity?.yaw ?? 0;
+    const pitch = opts.pitch ?? bot.entity?.pitch ?? 0;
+    await bot.look(yaw, pitch, opts.force !== false);
+    return this.getLook();
+  }
+
+  async turn(yaw = 0, pitch = 0): Promise<LookInfo> {
+    const bot = this.requireBot();
+    await bot.look((bot.entity?.yaw ?? 0) + yaw, (bot.entity?.pitch ?? 0) + pitch, true);
+    return this.getLook();
+  }
+
+  getLook(): LookInfo {
+    const bot = this.requireBot();
+    return {
+      yaw: bot.entity?.yaw ?? 0,
+      pitch: bot.entity?.pitch ?? 0,
+      target: cursorBlock(bot),
+      entity: cursorEntity(bot),
+    };
+  }
+
+  jump(): void {
+    const bot = this.requireBot();
+    bot.setControlState("jump", true);
+    if (this.jumpTimer) clearTimeout(this.jumpTimer);
+    this.jumpTimer = setTimeout(() => {
+      this.jumpTimer = null;
+      try {
+        this.bot?.setControlState("jump", false);
+      } catch {
+        // disconnected
+      }
+    }, 280);
+  }
+
+  attack(username?: string): void {
+    const bot = this.requireBot();
+    let target = username ? bot.players[username]?.entity : bot.entityAtCursor(6);
+    if (!target && !username) {
+      target = bot.nearestEntity((entity) => entity !== bot.entity && Boolean(entity.position));
+    }
+    if (!target) throw new Error(username ? `no entity for ${username}` : "no entity in reach");
+    bot.attack(target);
+  }
+
+  async dig(x?: number, y?: number, z?: number): Promise<BlockInfo> {
+    const bot = this.requireBot();
+    const block = resolveBlock(bot, x, y, z);
+    if (!block || block.name === "air" || block.name === "cave_air") throw new Error("no block to dig");
+    await bot.dig(block);
+    const p = block.position;
+    return { x: p.x, y: p.y, z: p.z, name: block.name };
+  }
+
+  stopDig(): void {
+    this.requireBot().stopDigging();
+  }
+
+  async place(x?: number, y?: number, z?: number, face: PlaceFace = "up"): Promise<void> {
+    const bot = this.requireBot();
+    const block = resolveBlock(bot, x, y, z);
+    if (!block) throw new Error("no block to place against");
+    await bot.placeBlock(block, faceVector(face));
+  }
+
+  async activate(x?: number, y?: number, z?: number): Promise<void> {
+    const bot = this.requireBot();
+    const block = resolveBlock(bot, x, y, z);
+    if (!block) throw new Error("no block to activate");
+    await bot.activateBlock(block);
+  }
+
+  swing(): void {
+    this.requireBot().swingArm(undefined, true);
+  }
+
+  respawn(): void {
+    this.requireBot().respawn();
+  }
+
+  getBlock(x: number, y: number, z: number): BlockInfo {
+    return snapshotBlockAt(this.requireBot(), x, y, z);
+  }
+
+  getEntities(): EntityInfo[] {
+    return listEntities(this.requireBot());
+  }
+
+  getMap(radius = 24): string {
+    const r = Math.min(48, Math.max(8, Math.round(radius)));
+    return dumpWorld(this.requireBot(), this.worldKind, { mapRadius: r }).asciiMap;
+  }
+
+  getView(radius?: number, includeMap = false): Surroundings {
+    const bot = this.requireBot();
+    const pos = bot.entity?.position;
+    return {
+      at: new Date().toISOString(),
+      status: this.getStatus(),
+      look: this.getLook(),
+      held: this.getInventory().held,
+      players: this.getPlayers()
+        .filter((player) => player.position)
+        .sort((a, b) => (a.distance ?? 9e9) - (b.distance ?? 9e9))
+        .slice(0, 40),
+      entities: listEntities(bot),
+      portals: pos ? findPortalBlocks(bot, 48) : [],
+      voxels: this.getVoxels(radius),
+      map: includeMap ? this.getMap(24) : undefined,
+    };
+  }
+
+  setControl(state: Partial<ControlState>): void {
+    const bot = this.requireBot();
+    for (const [key, value] of Object.entries(state) as [keyof ControlState, boolean][]) {
+      if (typeof value === "boolean") bot.setControlState(key, value);
+    }
+  }
+
+  stopMovement(): void {
+    const bot = this.bot;
+    if (!bot) return;
+    bot.clearControlStates();
+    try {
+      bot.pathfinder?.setGoal(null);
+    } catch {}
+  }
+
+  getPlayers(): PlayerInfo[] {
+    const bot = this.requireBot();
+    const origin = bot.entity?.position;
+    return Object.values(bot.players).map((player) => {
+      const entityPos = player.entity?.position;
+      return {
+        username: player.username,
+        uuid: player.uuid,
+        ping: player.ping,
+        gamemode: player.gamemode !== undefined ? String(player.gamemode) : undefined,
+        distance: origin && entityPos ? origin.distanceTo(entityPos) : undefined,
+        position: entityPos ? roundVec(entityPos) : undefined,
+        yaw: player.entity?.yaw,
+      };
+    });
+  }
+
+  getInventory(): InventoryView {
+    const bot = this.requireBot();
+    const slots: InventorySlot[] = [];
+    for (const item of bot.inventory.slots) {
+      if (!item) continue;
+      slots.push(snapshotItem(item));
+    }
+    const quickBarSlot = bot.quickBarSlot ?? 0;
+    const heldItem = bot.heldItem;
+    return {
+      quickBarSlot,
+      held: heldItem ? snapshotItem(heldItem) : null,
+      slots,
+    };
+  }
+
+  async manageInventory(command: InvCommand): Promise<InventoryView> {
+    const run = this.invChain.then(() => this.runInventory(command), () => this.runInventory(command));
+    this.invChain = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  dump(): WorldDump {
+    const bot = this.requireBot();
+    return dumpWorld(bot, this.worldKind);
+  }
+
+  getVoxels(radius?: number): VoxelField {
+    return sampleVoxels(this.requireBot(), clampVoxelRadius(radius, 20));
+  }
+
+  startPortalHunt(): void {
+    this.autoLobby = true;
+    this.navigator?.start();
+  }
+
+  stopPortalHunt(): void {
+    this.autoLobby = false;
+    this.navigator?.stop();
+  }
+
+  setFlags(flags: { autoReconnect?: boolean; autoLobby?: boolean }): void {
+    if (flags.autoReconnect !== undefined) this.autoReconnect = flags.autoReconnect;
+    if (flags.autoLobby !== undefined) {
+      this.autoLobby = flags.autoLobby;
+      if (this.autoLobby) this.navigator?.start();
+      else this.navigator?.stop();
+    }
+  }
+
+  private connect(): void {
+    const generation = ++this.joinGeneration;
+    this.authenticated = false;
+    this.reachedLogin = false;
+    this.serverPortalsEntered = 0;
+    this.worldKind = "unknown";
+    this.startedAt = Date.now();
+    this.setPhase("connecting");
+
+    const info = {
+      host: this.config.host,
+      port: this.config.port,
+      username: this.config.username,
+    };
+    this.emit("connecting", info);
+    log.info(`Joining ${info.host}:${info.port} as ${info.username} (offline)`);
+
+    let bot: Bot;
+    try {
+      bot = mineflayer.createBot({
+        host: this.config.host,
+        port: this.config.port,
+        username: this.config.username,
+        auth: "offline",
+        version: this.config.version || undefined,
+        brand: "fabric",
+        hideErrors: true,
+        checkTimeoutInterval: 120_000,
+        keepAlive: true,
+      });
+    } catch (error) {
+      this.bot = null;
+      this.noteFault("connect", error);
+      this.scheduleReconnect("connect");
+      return;
+    }
+    this.bot = bot;
+
+    bot.loadPlugin(pathfinder);
+    attachAnarchyMod(bot);
+    attachProtocolCompat(bot);
+    attachVelocityTransfer(bot);
+
+    this.auth = attachAuth(bot, this.password, () => {
+      if (generation !== this.joinGeneration) return;
+      this.authenticated = true;
+      this.emit("authenticated");
+      this.refreshWorld("authenticated");
+      setTimeout(() => {
+        if (generation !== this.joinGeneration) return;
+        this.refreshWorld("post-auth");
+        if (this.autoLobby) this.navigator?.start();
+      }, 2500);
+    });
+
+    this.navigator = createPortalNavigator(bot, this.config.portalRetryMs, {
+      onFound: (portal) => this.emit("portalFound", portal),
+      onEntered: (portal) => {
+        this.serverPortalsEntered += 1;
+        this.emit("portalEntered", { kind: portal.kind, count: this.serverPortalsEntered });
+        log.info(`Entered server portal ${this.serverPortalsEntered}/${this.config.requiredServerPortals}`);
+        setTimeout(() => this.refreshWorld("portal-enter"), 800);
+      },
+      onMiss: (reason) => {
+        if (!this.autoLobby) return;
+        this.emit("lobbyRetry", { inMs: this.config.portalRetryMs, reason });
+      },
+      getWorldKind: () => this.worldKind,
+      allowServerPortals: () =>
+        this.autoLobby &&
+        this.authenticated &&
+        this.serverPortalsEntered < this.config.requiredServerPortals &&
+        !isMainWorld(this.worldKind),
+    });
+
+    bot.on("messagestr", (message) => {
+      const text = redactSecrets(String(message)).slice(0, 200);
+      this.lastChat = text;
+      this.emit("chat", { raw: text, timestamp: Date.now() });
+    });
+
+    bot.once("login", () => {
+      if (generation !== this.joinGeneration) return;
+      this.reachedLogin = true;
+      this.lastError = undefined;
+      this.setPhase("authenticating");
+      this.emit("connected");
+      log.info("TCP login complete, waiting for spawn + /login");
+    });
+
+    bot.once("spawn", () => {
+      if (generation !== this.joinGeneration) return;
+      this.onSpawn("first");
+    });
+
+    bot.on("spawn", () => {
+      if (generation !== this.joinGeneration) return;
+      this.refreshWorld("spawn");
+    });
+
+    bot.on("respawn", () => {
+      if (generation !== this.joinGeneration) return;
+      this.refreshWorld("respawn");
+    });
+
+    bot.on("forcedMove", () => {
+      if (generation !== this.joinGeneration) return;
+      this.refreshWorld("forcedMove");
+    });
+
+    bot.on("kicked", (reason, loggedIn) => {
+      if (generation !== this.joinGeneration) return;
+      const text = stringifyKick(reason);
+      this.lastKick = text;
+      this.noteFault("kick", loggedIn ? `kicked: ${text}` : `kicked before login: ${text}`);
+      log.warn(`Kicked (loggedIn=${loggedIn}): ${text}`);
+      try {
+        log.warn(`Kick JSON: ${JSON.stringify(reason)}`);
+      } catch {}
+      this.emit("kicked", text);
+      this.auth?.destroy();
+      this.navigator?.stop();
+      this.scheduleReconnect("kicked");
+    });
+
+    bot.on("end", (reason) => {
+      if (generation !== this.joinGeneration) return;
+      const text = String(reason ?? "end");
+      log.warn(`Disconnected: ${text}`);
+      this.emit("disconnected", text);
+      if (this.leaving) {
+        this.setPhase("idle");
+        return;
+      }
+      this.noteFault(this.reachedLogin ? "disconnect" : "connect", text);
+      this.scheduleReconnect("end");
+    });
+
+    bot.on("error", (error) => {
+      if (generation !== this.joinGeneration) return;
+      const err = error instanceof Error ? error : new Error(String(error));
+      log.error("Bot error", err.message);
+      this.noteFault(this.reachedLogin ? "socket" : "connect", err);
+      this.emit("error", err);
+    });
+  }
+
+  private onSpawn(reason: string): void {
+    const bot = this.bot;
+    if (!bot) return;
+    this.refreshWorld(reason);
+    const dump = dumpWorld(bot, this.worldKind);
+    try {
+      const file = persistDump(this.config.rootDir, dump);
+      log.info(`World probe saved to ${file}`);
+    } catch (error) {
+      log.warn("Could not persist world dump", error instanceof Error ? error.message : error);
+    }
+    log.info(summarizeDump(dump));
+    if (dump.asciiMap) log.info(`\n${dump.asciiMap}`);
+    this.emit("spawned", dump);
+  }
+
+  private refreshWorld(reason: string): void {
+    const bot = this.bot;
+    if (!bot?.entity) return;
+    const kind = classifyWorld(bot, {
+      authenticated: this.authenticated,
+      serverPortalsEntered: this.serverPortalsEntered,
+      requiredServerPortals: this.config.requiredServerPortals,
+    });
+    if (kind !== this.worldKind) {
+      this.worldKind = kind;
+      this.emit("worldKind", kind);
+      log.info(`World kind is ${kind} (${reason})`);
+    }
+
+    if (isMainWorld(kind) && this.authenticated) {
+      this.navigator?.stop();
+      this.setPhase("in_game");
+      return;
+    }
+
+    if (this.authenticated && isLobbyLike(kind)) {
+      this.setPhase("lobby");
+      return;
+    }
+
+    if (!this.authenticated) this.setPhase("authenticating");
+  }
+
+  private noteFault(source: BotErrorSource, error: unknown): void {
+    const described = describeError(error);
+    let message = described.message;
+    if (source === "connect" && !message.includes(this.config.host)) {
+      message = `${message} (${this.config.host}:${this.config.port})`;
+    }
+    message = message.slice(0, 500);
+
+    const genericHangup =
+      source === "disconnect" && /^(socketClosed|end|connection|client disconnects)$/i.test(message);
+    if (genericHangup && this.lastError && this.faultJoinGeneration === this.joinGeneration) {
+      return;
+    }
+
+    this.lastError = {
+      at: new Date().toISOString(),
+      source,
+      message,
+      code: described.code,
+    };
+    this.faultJoinGeneration = this.joinGeneration;
+    this.emit("status", this.getStatus());
+  }
+
+  private scheduleReconnect(reason: string): void {
+    if (this.leaving || !this.autoReconnect) {
+      this.setPhase("disconnected");
+      return;
+    }
+    if (this.reconnectTimer) return;
+    this.setPhase("reconnecting");
+    const delay = this.config.reconnectMs;
+    log.info(`Rejoining in ${Math.round(delay / 1000)}s after ${reason}`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.leaving || !this.autoReconnect) return;
+      this.connect();
+    }, delay);
+  }
+
+  private clearReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private async disconnectInternal(reason: string): Promise<void> {
+    this.navigator?.stop();
+    this.auth?.destroy();
+    this.auth = null;
+    this.navigator = null;
+    const bot = this.bot;
+    this.bot = null;
+    if (!bot) return;
+    await new Promise<void>((resolve) => {
+      const done = () => resolve();
+      bot.once("end", done);
+      try {
+        bot.quit(reason);
+      } catch {
+        try {
+          bot.end(reason);
+        } catch {
+          done();
+        }
+      }
+      setTimeout(done, 1500);
+    });
+  }
+
+  private setPhase(phase: BotPhase): void {
+    if (this.phase === phase) return;
+    this.phase = phase;
+    this.emit("phase", phase);
+    this.emit("status", this.getStatus());
+  }
+
+  private requireBot(): Bot {
+    if (!this.bot) throw new Error("Bot is not connected. Run `join` first.");
+    return this.bot;
+  }
+
+  private async runInventory(command: InvCommand): Promise<InventoryView> {
+    const bot = this.requireBot();
+    if (bot.currentWindow) {
+      try {
+        bot.closeWindow(bot.currentWindow);
+      } catch {
+        // window may already be gone
+      }
+    }
+
+    const slot = command.slot;
+    const item = slot == null ? bot.heldItem : bot.inventory.slots[slot] ?? null;
+    const op = command.op;
+
+    if (op === "swap") {
+      if (slot == null || command.to == null) throw new Error("swap needs slot and to");
+      if (slot !== command.to) await bot.moveSlotItem(slot, command.to);
+      return this.getInventory();
+    }
+
+    if (op === "unequip") {
+      const dest = command.dest ?? destForSlot(slot);
+      if (!dest || dest === "hand") throw new Error("unequip needs head, torso, legs, feet, or off-hand");
+      await bot.unequip(dest);
+      return this.getInventory();
+    }
+
+    if (op === "hold") {
+      if (slot == null) throw new Error("hold needs a slot");
+      const hotbar = hotbarIndex(slot);
+      if (hotbar != null) bot.setQuickBarSlot(hotbar);
+      else {
+        if (!item) throw new Error(`slot ${slot} is empty`);
+        await bot.equip(item, "hand");
+      }
+      return this.getInventory();
+    }
+
+    if (!item) throw new Error(slot == null ? "not holding anything" : `slot ${slot} is empty`);
+
+    if (op === "dropStack") {
+      await bot.tossStack(item);
+      return this.getInventory();
+    }
+
+    if (op === "drop") {
+      const count = Math.max(1, Math.min(item.count, command.count ?? 1));
+      if (count >= item.count) await bot.tossStack(item);
+      else {
+        for (let i = 0; i < count; i++) await bot.clickWindow(item.slot, 0, 4);
+      }
+      return this.getInventory();
+    }
+
+    if (op === "equip") {
+      const dest = command.dest ?? guessDest(item.name);
+      await bot.equip(item, dest);
+      return this.getInventory();
+    }
+
+    if (op === "use") {
+      const hotbar = hotbarIndex(item.slot);
+      if (hotbar != null) bot.setQuickBarSlot(hotbar);
+      else await bot.equip(item, "hand");
+      const foods = bot.registry.foodsByName as Record<string, unknown> | undefined;
+      if (foods?.[item.name] || ALWAYS_CONSUMABLE.has(item.name)) await bot.consume();
+      else bot.activateItem();
+      return this.getInventory();
+    }
+
+    throw new Error(`unknown inventory op ${op}`);
+  }
+}
+
+const ALWAYS_CONSUMABLE = new Set([
+  "potion",
+  "milk_bucket",
+  "enchanted_golden_apple",
+  "golden_apple",
+  "honey_bottle",
+  "suspicious_stew",
+  "chorus_fruit",
+]);
+
+const HOTBAR_START = 36;
+
+function snapshotItem(item: {
+  slot: number;
+  name: string;
+  count: number;
+  displayName: string;
+  stackSize?: number;
+  durabilityUsed?: number;
+  maxDurability?: number;
+  customName?: string | null;
+}): InventorySlot {
+  return {
+    slot: item.slot,
+    name: item.name,
+    count: item.count,
+    displayName: item.displayName,
+    stackSize: item.stackSize,
+    durabilityUsed: item.maxDurability ? item.durabilityUsed : undefined,
+    maxDurability: item.maxDurability || undefined,
+    customName: item.customName ?? undefined,
+  };
+}
+
+function hotbarIndex(slot: number): number | null {
+  if (slot >= 0 && slot <= 8) return slot;
+  if (slot >= HOTBAR_START && slot <= HOTBAR_START + 8) return slot - HOTBAR_START;
+  return null;
+}
+
+function destForSlot(slot?: number): EquipmentDest | null {
+  if (slot === 5) return "head";
+  if (slot === 6) return "torso";
+  if (slot === 7) return "legs";
+  if (slot === 8) return "feet";
+  if (slot === 45) return "off-hand";
+  return null;
+}
+
+function guessDest(name: string): EquipmentDest {
+  if (/(_helmet|turtle_helmet|carved_pumpkin|_head|_skull)$/.test(name)) return "head";
+  if (/(_chestplate|elytra)$/.test(name)) return "torso";
+  if (/_leggings$/.test(name)) return "legs";
+  if (/_boots$/.test(name)) return "feet";
+  if (name === "shield" || name === "totem_of_undying") return "off-hand";
+  return "hand";
+}
+
+function redactPaths(message: string): string {
+  let out = message;
+  const home = os.homedir();
+  if (home) out = out.split(home).join("~");
+  const cwd = process.cwd();
+  if (cwd) out = out.split(cwd).join(".");
+  return out;
+}
+
+function describeError(error: unknown): { message: string; code?: string } {
+  if (error instanceof Error) {
+    const code = typeof (error as NodeJS.ErrnoException).code === "string"
+      ? (error as NodeJS.ErrnoException).code
+      : undefined;
+    const message = redactPaths(error.message || error.name || "unknown error");
+    if (code && !message.includes(code)) return { message: `${code}: ${message}`, code };
+    return { message, code };
+  }
+  if (typeof error === "string") return { message: redactPaths(error) };
+  try {
+    return { message: JSON.stringify(error) };
+  } catch {
+    return { message: String(error) };
+  }
+}
+
+function roundVec(v: { x: number; y: number; z: number }): Vec3Like {
+  return {
+    x: Math.round(v.x * 100) / 100,
+    y: Math.round(v.y * 100) / 100,
+    z: Math.round(v.z * 100) / 100,
+  };
+}
+
+function nbtText(reason: unknown): string | null {
+  if (!reason || typeof reason !== "object") return null;
+  const value = reason as { type?: string; value?: { text?: { value?: string } } };
+  if (value.type === "compound" && value.value?.text?.value) {
+    return value.value.text.value;
+  }
+  return null;
+}
+
+function stringifyKick(reason: unknown): string {
+  const fromNbt = nbtText(reason);
+  if (fromNbt) return fromNbt;
+  if (reason == null) return "unknown";
+  if (typeof reason === "string") return reason;
+  if (typeof reason === "object") {
+    const value = reason as {
+      toString?: () => string;
+      toMotd?: () => string;
+    };
+    try {
+      const text = value.toString?.();
+      if (text && text !== "[object Object]") return text;
+    } catch {
+      // fall through
+    }
+    try {
+      const motd = value.toMotd?.();
+      if (motd) return motd;
+    } catch {
+      // fall through
+    }
+    try {
+      return JSON.stringify(reason);
+    } catch {
+      return String(reason);
+    }
+  }
+  return String(reason);
+}
+
+function summarizeDump(dump: WorldDump): string {
+  const pos = dump.position
+    ? `${dump.position.x}, ${dump.position.y}, ${dump.position.z}`
+    : "?";
+  const portals = dump.portals.length
+    ? dump.portals
+        .slice(0, 5)
+        .map((p) => `${p.blockName}@${p.position.x},${p.position.y},${p.position.z} (${p.distance.toFixed(1)}m)`)
+        .join("; ")
+    : "none";
+  const island = dump.island
+    ? `island solid=${dump.island.solid} water=${dump.island.water} yes=${dump.island.looksLikeIsland}`
+    : "island=?";
+  return `Spawn ${pos} dim=${dump.dimension ?? "?"} kind=${dump.worldKind} gm=${dump.gameMode ?? "?"} border=${dump.worldBorderDiameter ?? "?"} ${island} blocks=${topBlockCounts(dump.nearbyCounts)} portals=${portals}`;
+}
+

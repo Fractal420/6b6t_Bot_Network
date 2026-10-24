@@ -3,7 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { KrynBot } from "./KrynBot.ts";
+import type { FractalBot } from "./FractalBot.ts";
 import type { ControlRequest, ControlResponse, JoinOptions } from "./types.ts";
 import { apiCatalog } from "./catalog.ts";
 import { log } from "../logger.ts";
@@ -32,7 +32,7 @@ export interface ControlServer {
 }
 
 export function startControlServer(
-  bot: KrynBot,
+  bot: FractalBot,
   host: string,
   port: number,
   token: string,
@@ -249,7 +249,7 @@ function truthy(value: string | null): boolean {
   return value === "1" || value === "true" || value === "yes";
 }
 
-async function dispatch(bot: KrynBot, request?: ControlRequest): Promise<ControlResponse> {
+async function dispatch(bot: FractalBot, request?: ControlRequest): Promise<ControlResponse> {
   if (!request?.action) return { ok: false, error: "missing action" };
   try {
     switch (request.action) {

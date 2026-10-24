@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
-import { assertJoinConfig, loadConfig, type KrynConfig } from "../config.ts";
-import { KrynBot } from "../api/KrynBot.ts";
+import { assertJoinConfig, loadConfig, type FractalConfig } from "../config.ts";
+import { FractalBot } from "../api/FractalBot.ts";
 import { startControlServer } from "../api/controlServer.ts";
 import { hardenControlConfig } from "../api/security.ts";
 import { log } from "../logger.ts";
@@ -21,14 +21,14 @@ export async function runCli(argv = process.argv): Promise<void> {
 
   const program = new Command();
   program
-    .name("krynbot")
+    .name("fractalbot")
     .description("Mineflayer control system for 6b6t")
     .showHelpAfterError()
     .enablePositionalOptions();
 
   program
     .command("join")
-    .description("Join 6b6t with the stored offline account (KRYNBOT_USERNAME / KRYNBOT_PASSWORD)")
+    .description("Join 6b6t with the stored offline account (FRACTAL_USERNAME / FRACTAL_PASSWORD)")
     .option("--host <host>", "server host")
     .option("--port <port>", "server port")
     .option("-u, --username <name>", "offline username")
@@ -73,7 +73,7 @@ export async function runCli(argv = process.argv): Promise<void> {
         printResult(await client.rpc({ action: "status" }));
         return;
       }
-      console.log({ connected: false, hint: "Bot is not running. Use `krynbot join`." });
+      console.log({ connected: false, hint: "Bot is not running. Use `fractalbot join`." });
     });
 
   program
@@ -268,7 +268,7 @@ export async function runCli(argv = process.argv): Promise<void> {
       const script = renderCompletionScript(kind);
       if (shell === "install") {
         console.log(script);
-        console.log(chalk.green(`\nAdd this to your ~/.${kind}rc:\n  eval "$(krynbot completion ${kind})"`));
+        console.log(chalk.green(`\nAdd this to your ~/.${kind}rc:\n  eval "$(fractalbot completion ${kind})"`));
         return;
       }
       process.stdout.write(script);
@@ -282,7 +282,7 @@ export async function runCli(argv = process.argv): Promise<void> {
 }
 
 async function runSession(
-  config: KrynConfig,
+  config: FractalConfig,
   options: { daemon: boolean; autoLobby: boolean; autoReconnect: boolean; joinNow?: boolean },
 ): Promise<void> {
   const existing = controlClient(config);
@@ -301,12 +301,12 @@ async function runSession(
       );
     }
     if (!options.daemon) {
-      console.log(chalk.yellow("A bot process is already running. Use `krynbot status`, `krynbot chat`, etc."));
+      console.log(chalk.yellow("A bot process is already running. Use `fractalbot status`, `fractalbot chat`, etc."));
     }
     return;
   }
 
-  const bot = new KrynBot(config);
+  const bot = new FractalBot(config);
   wireLogs(bot);
   const hardened = hardenControlConfig(config);
   const server = await startControlServer(bot, hardened.controlHost, hardened.controlPort, hardened.controlToken);
@@ -336,7 +336,7 @@ async function runSession(
   }
 
   if (options.daemon) {
-    log.info(`Dashboard at ${server.url}  ·  CLI: krynbot status / krynbot chat`);
+    log.info(`Dashboard at ${server.url}  ·  CLI: fractalbot status / fractalbot chat`);
     return;
   }
 
@@ -344,10 +344,10 @@ async function runSession(
   await shutdown();
 }
 
-async function proxyOrFail(config: KrynConfig, request: ControlRequest) {
+async function proxyOrFail(config: FractalConfig, request: ControlRequest) {
   const client = controlClient(config);
   if (!(await client.ping())) {
-    throw new Error("Bot is not running. Start it with `krynbot join`.");
+    throw new Error("Bot is not running. Start it with `fractalbot join`.");
   }
   const result = await client.rpc(request);
   printResult(result);
@@ -402,7 +402,7 @@ function printResult(result: { ok: boolean; error?: string; data?: unknown }): v
   }
 }
 
-function wireLogs(bot: KrynBot): void {
+function wireLogs(bot: FractalBot): void {
   bot.on("chat", (event) => log.info(`chat ${redactSecrets(stripCtl(event.raw))}`));
   bot.on("kicked", (reason) => log.warn(`kicked ${reason}`));
   bot.on("portalFound", (portal) =>

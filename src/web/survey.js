@@ -17,14 +17,14 @@
   const hudEl = document.getElementById("survey-hud");
   const compassEl = document.getElementById("survey-compass");
   if (!canvas || !(canvas instanceof HTMLCanvasElement)) {
-    window.krynSurvey = stub;
+    window.fractalSurvey = stub;
     return;
   }
 
   const gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
   if (!gl) {
     if (metaEl) metaEl.textContent = "webgl2 missing";
-    window.krynSurvey = stub;
+    window.fractalSurvey = stub;
     return;
   }
 
@@ -1134,7 +1134,7 @@ void main() {
 
   syncModeButtons();
 
-  window.krynSurvey = {
+  window.fractalSurvey = {
     setField,
     setBot,
     setPlayers,
@@ -1150,6 +1150,6 @@ void main() {
     const message = err instanceof Error ? err.message : String(err);
     if (metaEl) metaEl.textContent = message;
     console.error(err);
-    window.krynSurvey = stub;
+    window.fractalSurvey = stub;
   }
 })();

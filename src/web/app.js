@@ -17,7 +17,7 @@ let lastFaultAt = "";
 
 function token() {
   const params = new URLSearchParams(location.search);
-  return params.get("token") || localStorage.getItem("kryn-token") || "";
+  return params.get("token") || localStorage.getItem("fractal-token") || "";
 }
 
 function headers() {
@@ -86,7 +86,7 @@ function renderStatus(data) {
   } else {
     fault.hidden = true;
   }
-  if (data.position) window.krynSurvey?.setBot(data.position, data.yaw, data.username);
+  if (data.position) window.fractalSurvey?.setBot(data.position, data.yaw, data.username);
 }
 
 function push(kind, text) {
@@ -247,7 +247,7 @@ async function refresh() {
     else if (st.error) push("err", st.error === "unauthorized" ? "unauthorized · refresh http://127.0.0.1:37637/" : st.error);
     if (players.ok) {
       renderPlayers(players.data);
-      window.krynSurvey?.setPlayers(players.data);
+      window.fractalSurvey?.setPlayers(players.data);
     }
     if (inv.ok) renderInventory(inv.data);
   } catch {
@@ -256,11 +256,11 @@ async function refresh() {
 }
 
 async function refreshVoxels() {
-  if (!window.krynSurvey) return;
+  if (!window.fractalSurvey) return;
   try {
-    const r = window.krynSurvey.radius ?? 20;
+    const r = window.fractalSurvey.radius ?? 20;
     const res = await fetch(`/v1/voxels?r=${r}`, { credentials: "same-origin", headers: headers() }).then((row) => row.json());
-    if (res.ok) window.krynSurvey.setField(res.data);
+    if (res.ok) window.fractalSurvey.setField(res.data);
   } catch {
     /* bot may be between worlds */
   }
@@ -310,7 +310,7 @@ async function sendControl() {
 }
 
 function surveyOwnsKeys() {
-  return window.krynSurvey?.ownsKeys?.() ?? false;
+  return window.fractalSurvey?.ownsKeys?.() ?? false;
 }
 
 function clearBotKeys() {

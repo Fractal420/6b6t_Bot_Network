@@ -1,4 +1,4 @@
-# 6bBotAPI
+# Fractal 6b Slave Bot
 
 > Original Work: https://github.com/ClapFy/6bBotAPI
 
@@ -14,18 +14,18 @@ cp .env.example .env
 Put the offline username and in-game password in `.env` (never commit that file):
 
 ```
-KRYNBOT_HOST=alt3.6b6t.org
-KRYNBOT_USERNAME=your_account
-KRYNBOT_PASSWORD=...
-KRYNBOT_AUTH=offline
-KRYNBOT_VERSION=1.21.11
+FRACTAL_HOST=alt3.6b6t.org
+FRACTAL_USERNAME=your_account
+FRACTAL_PASSWORD=...
+FRACTAL_AUTH=offline
+FRACTAL_VERSION=1.21.11
 ```
 
 Optionally install the CLI on your PATH:
 
 ```bash
 npm link
-eval "$(krynbot completion zsh)"   # or: krynbot completion bash
+eval "$(fractalbot completion zsh)"   # or: fractalbot completion bash
 ```
 
 Start the control API and dashboard:
@@ -37,26 +37,26 @@ npm start
 ## CLI
 
 ```bash
-krynbot join              # offline join + /login from .env, then an interactive shell
-krynbot join --daemon     # same, no shell; keep using the CLI against the running bot
-krynbot status
-krynbot chat hello
-krynbot cmd home
-krynbot map               # ASCII top-down of the lobby / area
-krynbot hunt              # (re)start walking into server portals
-krynbot leave
+fractalbot join              # offline join + /login from .env, then an interactive shell
+fractalbot join --daemon     # same, no shell; keep using the CLI against the running bot
+fractalbot status
+fractalbot chat hello
+fractalbot cmd home
+fractalbot map               # ASCII top-down of the lobby / area
+fractalbot hunt              # (re)start walking into server portals
+fractalbot leave
 ```
 
-`join` never asks for the password. Tab-complete works in the shell and after `eval "$(krynbot completion zsh)"`.
+`join` never asks for the password. Tab-complete works in the shell and after `eval "$(fractalbot completion zsh)"`.
 
 If a server portal cannot be found after join, the bot stays connected and retries every 60 seconds. A full kick from the server triggers an automatic reconnect.
 
 ## Control API
 
-While the bot is running, a local API listens on `127.0.0.1:37637` only. It always requires `KRYNBOT_CONTROL_TOKEN` (generated into `.env` on first run). The dashboard sets an HttpOnly cookie; CLI/curl send `Authorization: Bearer …`. `GET /health` stays unauthenticated (loopback-only). `GET /v1/catalog` requires the token.
+While the bot is running, a local API listens on `127.0.0.1:37637` only. It always requires `FRACTAL_CONTROL_TOKEN` (generated into `.env` on first run). The dashboard sets an HttpOnly cookie; CLI/curl send `Authorization: Bearer …`. `GET /health` stays unauthenticated (loopback-only). `GET /v1/catalog` requires the token.
 
 ```bash
-TOKEN=$(grep '^KRYNBOT_CONTROL_TOKEN=' .env | cut -d= -f2-)
+TOKEN=$(grep '^FRACTAL_CONTROL_TOKEN=' .env | cut -d= -f2-)
 curl -s -H "authorization: Bearer $TOKEN" http://127.0.0.1:37637/v1/view?r=16
 curl -s -X POST http://127.0.0.1:37637/v1/rpc \
   -H "authorization: Bearer $TOKEN" \
@@ -87,10 +87,10 @@ Interact: `attack`, `dig`, `stopDig`, `place`, `activate`, `swing`, `inv`, `chat
 Join credentials and Minecraft host cannot be changed over the API — only via `.env` / CLI.
 
 ```ts
-import { KrynBot } from "krynbot";
-import { loadConfig } from "krynbot/config";
+import { FractalBot } from "fractalbot";
+import { loadConfig } from "fractalbot/config";
 
-const bot = new KrynBot(loadConfig());
+const bot = new FractalBot(loadConfig());
 await bot.join();
 bot.on("chat", (event) => console.log(event.raw));
 bot.chat("hello");

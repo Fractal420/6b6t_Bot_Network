@@ -1,11 +1,11 @@
 import readline from "node:readline";
 import chalk from "chalk";
-import type { KrynBot } from "../api/KrynBot.ts";
+import type { FractalBot } from "../api/FractalBot.ts";
 import type { InvCommand } from "../api/types.ts";
 import { CLI_COMMANDS, complete } from "./complete.ts";
 import { stripCtl } from "../api/security.ts";
 
-export function startRepl(bot: KrynBot): Promise<void> {
+export function startRepl(bot: FractalBot): Promise<void> {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -18,7 +18,7 @@ export function startRepl(bot: KrynBot): Promise<void> {
 
   const prompt = () => {
     const status = bot.getStatus();
-    rl.setPrompt(chalk.green(`kryn:${status.phase}> `));
+    rl.setPrompt(chalk.green(`fractal:${status.phase}> `));
     rl.prompt();
   };
 
@@ -64,7 +64,7 @@ export function startRepl(bot: KrynBot): Promise<void> {
   });
 }
 
-export async function handleReplLine(bot: KrynBot, line: string): Promise<void> {
+export async function handleReplLine(bot: FractalBot, line: string): Promise<void> {
   const args = tokenize(line);
   const command = args.shift() ?? "";
   switch (command) {

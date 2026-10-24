@@ -1,12 +1,12 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type http from "node:http";
-import type { KrynConfig } from "../config.ts";
+import type { FractalConfig } from "../config.ts";
 import { upsertEnvVar } from "../config.ts";
 import { log } from "../logger.ts";
 
 export const MAX_BODY_BYTES = 256 * 1024;
 export const MAX_CHAT_CHARS = 256;
-export const COOKIE_NAME = "kryn_token";
+export const COOKIE_NAME = "fractal_token";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"]);
 
@@ -21,28 +21,28 @@ export function isLoopbackAddress(addr?: string | null): boolean {
   return isLoopbackHost(h);
 }
 
-export function assertSafeControlBind(config: KrynConfig): void {
-  const expose = process.env.KRYNBOT_CONTROL_EXPOSE === "1";
+export function assertSafeControlBind(config: FractalConfig): void {
+  const expose = process.env.FRACTAL_CONTROL_EXPOSE === "1";
   if (isLoopbackHost(config.controlHost)) return;
   if (expose) {
-    log.warn(`Control API is exposed on ${config.controlHost} (KRYNBOT_CONTROL_EXPOSE=1)`);
+    log.warn(`Control API is exposed on ${config.controlHost} (FRACTAL_CONTROL_EXPOSE=1)`);
     return;
   }
   throw new Error(
-    `Refusing to bind the control API on ${config.controlHost}. Keep KRYNBOT_CONTROL_HOST=127.0.0.1, or set KRYNBOT_CONTROL_EXPOSE=1 if you really mean it.`,
+    `Refusing to bind the control API on ${config.controlHost}. Keep FRACTAL_CONTROL_HOST=127.0.0.1, or set FRACTAL_CONTROL_EXPOSE=1 if you really mean it.`,
   );
 }
 
-export function ensureControlToken(config: KrynConfig): string {
+export function ensureControlToken(config: FractalConfig): string {
   const existing = config.controlToken.trim();
   if (existing.length >= 16) return existing;
   const token = randomBytes(32).toString("hex");
-  upsertEnvVar("KRYNBOT_CONTROL_TOKEN", token);
-  log.info("Generated KRYNBOT_CONTROL_TOKEN and wrote it to .env (loopback API now requires this token)");
+  upsertEnvVar("FRACTAL_CONTROL_TOKEN", token);
+  log.info("Generated FRACTAL_CONTROL_TOKEN and wrote it to .env (loopback API now requires this token)");
   return token;
 }
 
-export function hardenControlConfig(config: KrynConfig): KrynConfig {
+export function hardenControlConfig(config: FractalConfig): FractalConfig {
   assertSafeControlBind(config);
   return { ...config, controlToken: ensureControlToken(config) };
 }
@@ -100,13 +100,13 @@ function originAllowed(origin: string, port: number): boolean {
 
 export function clientAllowed(req: http.IncomingMessage, port: number): boolean {
   const remote = req.socket.remoteAddress;
-  if (!isLoopbackAddress(remote) && process.env.KRYNBOT_CONTROL_EXPOSE !== "1") {
+  if (!isLoopbackAddress(remote) && process.env.FRACTAL_CONTROL_EXPOSE !== "1") {
     return false;
   }
 
   const host = hostName(headerString(req.headers.host));
   if (!host || !isLoopbackHost(host)) {
-    if (process.env.KRYNBOT_CONTROL_EXPOSE === "1") return true;
+    if (process.env.FRACTAL_CONTROL_EXPOSE === "1") return true;
     return false;
   }
 

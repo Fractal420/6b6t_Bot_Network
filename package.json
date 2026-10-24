@@ -1,10 +1,10 @@
 {
-  "name": "krynbot",
+  "name": "fractalbot",
   "version": "1.0.0",
-  "description": "Mineflayer control system for 6b6t (offline accounts, lobby portals, CLI + HTTP API)",
+  "description": "Fractal 6b Slave Bot — Mineflayer control system for 6b6t (offline accounts, lobby portals, CLI + HTTP API)",
   "type": "module",
   "bin": {
-    "krynbot": "./bin/krynbot.mjs"
+    "fractalbot": "./bin/fractalbot.mjs"
   },
   "main": "./src/api/index.ts",
   "exports": {
@@ -16,7 +16,7 @@
   },
   "scripts": {
     "start": "tsx src/index.ts",
-    "krynbot": "tsx src/index.ts",
+    "fractalbot": "tsx src/index.ts",
     "dev": "tsx src/index.ts shell",
     "test": "tsx --test src/minecraft/lobby/portals.test.ts src/minecraft/lobby/navigator.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

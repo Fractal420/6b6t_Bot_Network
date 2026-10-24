@@ -222,7 +222,7 @@ export interface ChatEvent {
   timestamp: number;
 }
 
-export interface KrynBotEvents {
+export interface FractalBotEvents {
   phase: (phase: BotPhase) => void;
   connecting: (info: { host: string; port: number; username: string }) => void;
   connected: () => void;

@@ -46,7 +46,7 @@ function prefix(options: readonly string[], last: string): string[] {
   return options.filter((option) => option.startsWith(last));
 }
 
-export function renderCompletionScript(shell: "bash" | "zsh", bin = "krynbot"): string {
+export function renderCompletionScript(shell: "bash" | "zsh", bin = "fractalbot"): string {
   if (shell === "zsh") {
     return `#compdef ${bin}
 # Add to ~/.zshrc: eval "$(${bin} completion zsh)"
