@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .env
+.env.*
+!.env.example
 *.log
 logs/
 .DS_Store
@@ -8,3 +10,7 @@ coverage/
 *.tsbuildinfo
 accounts.json
 package-lock.json
+auth_cache/
+output/
+.idea/
+.vscode/
