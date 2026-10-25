@@ -15,13 +15,13 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "start": "tsx src/index.ts",
-    "fractalbot": "tsx src/index.ts",
-    "dev": "tsx src/index.ts shell",
-    "test": "tsx --test src/minecraft/lobby/portals.test.ts src/minecraft/lobby/navigator.test.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "tsc -p tsconfig.json --noEmit",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "start": "npx tsx src/index.ts",
+    "fractalbot": "npx tsx src/index.ts",
+    "dev": "npx tsx src/index.ts shell",
+    "test": "npx tsx --test src/minecraft/lobby/portals.test.ts src/minecraft/lobby/navigator.test.ts",
+    "typecheck": "npx tsc -p tsconfig.json --noEmit",
+    "build": "npx tsc -p tsconfig.json --noEmit",
+    "lint": "npx tsc -p tsconfig.json --noEmit"
   },
   "engines": {
     "node": ">=20"
@@ -42,7 +42,8 @@
     "mineflayer-pathfinder": "^2.4.5",
     "pngjs": "^7.0.0",
     "vec3": "^0.1.10",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "tsx": "^4.20.5"
   },
   "optionalDependencies": {
     "discord.js": "^14.16.3"
@@ -50,7 +51,6 @@
   "devDependencies": {
     "@types/node": "^24.3.0",
     "@types/ws": "^8.18.1",
-    "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   },
   "overrides": {

@@ -643,12 +643,21 @@ void main() {
   let mode = "orbit";
   let orbitAngle = 0.7;
   let radius = 20;
+  /** Camera in *local* space (relative to origin). */
   let eye = [0, 80, 0];
   let yaw = 0;
   let pitch = -0.45;
   let flying = false;
   let dragging = false;
   let seeded = false;
+  /**
+   * World-space origin for GPU. Absolute coords near 6b6t highways (~1e7)
+   * destroy float32 precision; everything is drawn relative to this.
+   */
+  let origin = [0, 0, 0];
+  /** When false, skip GPU draw + keep last frame dark (saves CPU/GPU; fetches gated in app.js). */
+  let enabled = true;
+  let rafPending = false;
   const flyKeys = new Set();
   const FLY_CODES = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyC", "KeyQ", "KeyE", "ShiftLeft", "KeyR"]);
   let lastT = performance.now();
@@ -667,29 +676,49 @@ void main() {
     return rows.length;
   }
 
-  function setField(next) {
-    field = next;
-    occupancy = new Map();
+  function lx(x) {
+    return x - origin[0];
+  }
+  function ly(y) {
+    return y - origin[1];
+  }
+  function lz(z) {
+    return z - origin[2];
+  }
+
+  /** Snap GPU origin near the bot (or field center). Rebuild voxels when origin moves a lot. */
+  function setOriginNear(x, y, z) {
+    const nx = Math.floor(x);
+    const ny = Math.floor(y);
+    const nz = Math.floor(z);
+    const jump =
+      Math.abs(nx - origin[0]) > 48 || Math.abs(ny - origin[1]) > 48 || Math.abs(nz - origin[2]) > 48;
+    if (!jump && seeded) return false;
+    origin = [nx, ny, nz];
+    return true;
+  }
+
+  function rebuildVoxelInstances() {
+    if (!field) {
+      voxelCount = writeInstances(instBuf, []);
+      return;
+    }
     const rows = [];
-    const cells = next?.cells || [];
-    const palette = next?.palette || [];
+    const cells = field.cells || [];
+    const palette = field.palette || [];
     for (let i = 0; i + 3 < cells.length; i += 4) {
-      const lx = cells[i];
-      const ly = cells[i + 1];
-      const lz = cells[i + 2];
       const name = palette[cells[i + 3]] || "stone";
-      const wx = next.ox + lx;
-      const wy = next.oy + ly;
-      const wz = next.oz + lz;
-      occupancy.set(`${wx},${wy},${wz}`, name);
+      const wx = field.ox + cells[i];
+      const wy = field.oy + cells[i + 1];
+      const wz = field.oz + cells[i + 2];
       const rgb = colorOf(name);
       const tiles = tilesFor(name);
       const tint = tiles[0] === 0 || tiles[0] === WOOL_TILE;
       const col = tint ? rgb : [1, 1, 1];
       rows.push([
-        wx + 0.5,
-        wy + 0.5,
-        wz + 0.5,
+        lx(wx) + 0.5,
+        ly(wy) + 0.5,
+        lz(wz) + 0.5,
         col[0],
         col[1],
         col[2],
@@ -702,12 +731,31 @@ void main() {
       ]);
     }
     voxelCount = writeInstances(instBuf, rows);
+  }
+
+  function setField(next) {
+    field = next;
+    occupancy = new Map();
+    const cells = next?.cells || [];
+    const palette = next?.palette || [];
+    for (let i = 0; i + 3 < cells.length; i += 4) {
+      const name = palette[cells[i + 3]] || "stone";
+      const wx = next.ox + cells[i];
+      const wy = next.oy + cells[i + 1];
+      const wz = next.oz + cells[i + 2];
+      occupancy.set(`${wx},${wy},${wz}`, name);
+    }
     if (next?.entities) {
       const self = next.entities.find((e) => e.kind === "bot");
       if (self) bot = self;
       others = next.entities.filter((e) => e.kind === "player");
     }
-    const n = rows.length;
+    // Anchor origin on bot (or field center) so highway coords stay precise
+    if (bot) setOriginNear(bot.x, bot.y, bot.z);
+    else if (next)
+      setOriginNear(next.ox + (next.sx || 0) / 2, next.oy + (next.sy || 0) / 2, next.oz + (next.sz || 0) / 2);
+    rebuildVoxelInstances();
+    const n = occupancy.size;
     if (metaEl) {
       metaEl.textContent = n
         ? `${n} cells · ${next.sx}×${next.sy}×${next.sz} @ ${next.ox} ${next.oy} ${next.oz}`
@@ -721,6 +769,10 @@ void main() {
 
   function setBot(pos, heading, name) {
     if (!pos) return;
+    const prev = bot;
+    const jump =
+      prev &&
+      Math.hypot(pos.x - prev.x, pos.y - prev.y, pos.z - prev.z) > 32;
     bot = {
       name: name || bot?.name || "unknown",
       kind: "bot",
@@ -729,7 +781,8 @@ void main() {
       z: pos.z,
       yaw: heading,
     };
-    if (!seeded) {
+    if (setOriginNear(pos.x, pos.y, pos.z) && field) rebuildVoxelInstances();
+    if (!seeded || jump) {
       seedCamera();
       seeded = true;
     }
@@ -750,8 +803,9 @@ void main() {
 
   function seedCamera() {
     if (!bot) return;
-    eye = [bot.x + 14, bot.y + 9, bot.z + 14];
-    lookToward(bot.x, bot.y + 1, bot.z);
+    // Local-space orbit start
+    eye = [14, 9, 14];
+    lookToward(lx(bot.x), ly(bot.y) + 1, lz(bot.z));
   }
 
   function lookToward(x, y, z) {
@@ -839,10 +893,36 @@ void main() {
   function entityRows() {
     const rows = [];
     if (bot) {
-      rows.push([bot.x, bot.y + 0.9, bot.z, 0.88, 0.69, 0.26, 0.55, 1.8, 0.55, -1, -1, -1]);
+      rows.push([
+        lx(bot.x),
+        ly(bot.y) + 0.9,
+        lz(bot.z),
+        0.88,
+        0.69,
+        0.26,
+        0.55,
+        1.8,
+        0.55,
+        -1,
+        -1,
+        -1,
+      ]);
     }
     for (const p of others) {
-      rows.push([p.x, p.y + 0.9, p.z, 0.89, 0.29, 0.07, 0.5, 1.7, 0.5, -1, -1, -1]);
+      rows.push([
+        lx(p.x),
+        ly(p.y) + 0.9,
+        lz(p.z),
+        0.89,
+        0.29,
+        0.07,
+        0.5,
+        1.7,
+        0.5,
+        -1,
+        -1,
+        -1,
+      ]);
     }
     return rows;
   }
@@ -850,7 +930,8 @@ void main() {
   function pickBlock() {
     if (!occupancy.size) return null;
     const f = forward();
-    const pos = [eye[0], eye[1], eye[2]];
+    // Ray in local space, occupancy keys are world coords
+    const pos = [eye[0] + origin[0], eye[1] + origin[1], eye[2] + origin[2]];
     let x = Math.floor(pos[0]);
     let y = Math.floor(pos[1]);
     let z = Math.floor(pos[2]);
@@ -860,9 +941,9 @@ void main() {
     const tDeltaX = Math.abs(1 / (f[0] || 1e-8));
     const tDeltaY = Math.abs(1 / (f[1] || 1e-8));
     const tDeltaZ = Math.abs(1 / (f[2] || 1e-8));
-    let tMaxX = ((stepX > 0 ? x + 1 - pos[0] : pos[0] - x) * tDeltaX);
-    let tMaxY = ((stepY > 0 ? y + 1 - pos[1] : pos[1] - y) * tDeltaY);
-    let tMaxZ = ((stepZ > 0 ? z + 1 - pos[2] : pos[2] - z) * tDeltaZ);
+    let tMaxX = (stepX > 0 ? x + 1 - pos[0] : pos[0] - x) * tDeltaX;
+    let tMaxY = (stepY > 0 ? y + 1 - pos[1] : pos[1] - y) * tDeltaY;
+    let tMaxZ = (stepZ > 0 ? z + 1 - pos[2] : pos[2] - z) * tDeltaZ;
     for (let i = 0; i < 80; i++) {
       const name = occupancy.get(`${x},${y},${z}`);
       if (name) return { x, y, z, name };
@@ -1027,21 +1108,41 @@ void main() {
 
   function placeCamera(dt) {
     if (!bot) return;
+    const bx = lx(bot.x);
+    const by = ly(bot.y);
+    const bz = lz(bot.z);
     if (mode === "orbit" && !ownsKeys()) {
       orbitAngle += dt * 0.18;
       const dist = Math.max(12, radius * 0.7);
-      eye = [bot.x + Math.cos(orbitAngle) * dist, bot.y + 8, bot.z + Math.sin(orbitAngle) * dist];
-      lookToward(bot.x, bot.y + 1.2, bot.z);
+      eye = [bx + Math.cos(orbitAngle) * dist, by + 8, bz + Math.sin(orbitAngle) * dist];
+      lookToward(bx, by + 1.2, bz);
     } else if (mode === "follow") {
       const fx = -Math.sin(bot.yaw || 0);
       const fz = Math.cos(bot.yaw || 0);
-      eye = [bot.x - fx * 12, bot.y + 5.5, bot.z - fz * 12];
-      lookToward(bot.x, bot.y + 1.4, bot.z);
+      eye = [bx - fx * 12, by + 5.5, bz - fz * 12];
+      lookToward(bx, by + 1.4, bz);
     }
+  }
+
+  function scheduleDraw() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      draw();
+    });
   }
 
   function draw() {
     try {
+    if (!enabled) {
+      // Idle: no continuous rAF while 3D is off (saves battery / GPU)
+      const fog = [0.04, 0.03, 0.025];
+      gl.clearColor(fog[0], fog[1], fog[2], 1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      if (metaEl) metaEl.textContent = "3D view off";
+      return;
+    }
     const now = performance.now();
     const dt = Math.min(0.05, (now - lastT) / 1000);
     lastT = now;
@@ -1107,9 +1208,9 @@ void main() {
     gl.uniformMatrix4fv(gl.getUniformLocation(gridProg, "uViewProj"), false, viewProj);
     gl.uniform3f(
       gl.getUniformLocation(gridProg, "uOrigin"),
-      bot?.x ?? 0,
-      Math.floor(bot?.y ?? field?.oy ?? 0) + 0.02,
-      bot?.z ?? 0,
+      bot ? lx(bot.x) : 0,
+      Math.floor(bot ? ly(bot.y) : 0) + 0.02,
+      bot ? lz(bot.z) : 0,
     );
     gl.uniform1f(gl.getUniformLocation(gridProg, "uSize"), Math.max(24, radius + 8));
     gl.uniform3f(gl.getUniformLocation(gridProg, "uCam"), eye[0], eye[1], eye[2]);
@@ -1118,12 +1219,31 @@ void main() {
     gl.depthMask(true);
     gl.disable(gl.BLEND);
 
-    requestAnimationFrame(draw);
+    scheduleDraw();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (metaEl) metaEl.textContent = `draw: ${message}`;
       console.error(err);
-      requestAnimationFrame(draw);
+      if (enabled) scheduleDraw();
+    }
+  }
+
+  function setEnabled(on) {
+    const next = Boolean(on);
+    if (enabled === next) return;
+    enabled = next;
+    if (!enabled) {
+      // Drop terrain so memory is free and next enable starts clean
+      field = null;
+      occupancy = new Map();
+      voxelCount = writeInstances(instBuf, []);
+      others = [];
+      if (metaEl) metaEl.textContent = "3D view off";
+      // one clear frame
+      scheduleDraw();
+    } else {
+      lastT = performance.now();
+      scheduleDraw();
     }
   }
 
@@ -1138,14 +1258,19 @@ void main() {
     setField,
     setBot,
     setPlayers,
+    setEnabled,
     isFlying,
     ownsKeys,
+    get enabled() {
+      return enabled;
+    },
     get radius() {
       return radius;
     },
+    resize,
   };
 
-  requestAnimationFrame(draw);
+  scheduleDraw();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (metaEl) metaEl.textContent = message;

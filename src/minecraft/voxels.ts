@@ -3,7 +3,16 @@ import { Vec3 } from "vec3";
 import type { VoxelEntity, VoxelField } from "../api/types.ts";
 
 const AIR = new Set(["air", "cave_air", "void_air", "structure_void", "light"]);
-const MAX_CELLS = 14_000;
+const MAX_CELLS_FULL = 14_000;
+const MAX_CELLS_LITE = 3_500;
+
+export type VoxelQuality = "full" | "lite";
+
+export interface VoxelSampleOptions {
+  radius?: number;
+  /** full = every block; lite = every 2nd block + fewer cells (far less bandwidth). */
+  quality?: VoxelQuality;
+}
 
 function nameAt(bot: Bot, x: number, y: number, z: number): string {
   try {
@@ -27,17 +36,26 @@ function occludes(name: string): boolean {
   return true;
 }
 
-export function clampVoxelRadius(raw: unknown, fallback = 20): number {
+export function clampVoxelRadius(raw: unknown, fallback = 20, quality: VoxelQuality = "full"): number {
   const n = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(28, Math.max(8, Math.round(n)));
+  const base = Number.isFinite(n) ? n : fallback;
+  if (quality === "lite") {
+    // Lite stays tight around the bot — enough to see threats / portals
+    return Math.min(16, Math.max(6, Math.round(base)));
+  }
+  return Math.min(28, Math.max(8, Math.round(base)));
 }
 
-export function sampleVoxels(bot: Bot, radius = 20): VoxelField {
-  const r = clampVoxelRadius(radius);
+export function sampleVoxels(bot: Bot, radiusOrOpts: number | VoxelSampleOptions = 20): VoxelField {
+  const opts: VoxelSampleOptions =
+    typeof radiusOrOpts === "number" ? { radius: radiusOrOpts, quality: "full" } : radiusOrOpts || {};
+  const quality: VoxelQuality = opts.quality === "lite" ? "lite" : "full";
+  const step = quality === "lite" ? 2 : 1;
+  const maxCells = quality === "lite" ? MAX_CELLS_LITE : MAX_CELLS_FULL;
+  const r = clampVoxelRadius(opts.radius ?? 20, quality === "lite" ? 12 : 20, quality);
   const pos = bot.entity?.position;
-  const yDown = Math.max(6, Math.round(r * 0.45));
-  const yUp = Math.max(8, Math.round(r * 0.6));
+  const yDown = Math.max(quality === "lite" ? 4 : 6, Math.round(r * (quality === "lite" ? 0.35 : 0.45)));
+  const yUp = Math.max(quality === "lite" ? 5 : 8, Math.round(r * (quality === "lite" ? 0.45 : 0.6)));
   const ox = pos ? Math.floor(pos.x) - r : 0;
   const oy = pos ? Math.floor(pos.y) - yDown : 0;
   const oz = pos ? Math.floor(pos.z) - r : 0;
@@ -48,10 +66,22 @@ export function sampleVoxels(bot: Bot, radius = 20): VoxelField {
   const index = (ix: number, iy: number, iz: number) => ix + iz * sx + iy * sx * sz;
 
   if (pos) {
-    for (let iy = 0; iy < sy; iy++) {
-      for (let iz = 0; iz < sz; iz++) {
-        for (let ix = 0; ix < sx; ix++) {
-          volume[index(ix, iy, iz)] = nameAt(bot, ox + ix, oy + iy, oz + iz);
+    for (let iy = 0; iy < sy; iy += step) {
+      for (let iz = 0; iz < sz; iz += step) {
+        for (let ix = 0; ix < sx; ix += step) {
+          const name = nameAt(bot, ox + ix, oy + iy, oz + iz);
+          volume[index(ix, iy, iz)] = name;
+          // Fill the step cube so surface culling still works on a coarse grid
+          if (step > 1) {
+            for (let dy = 0; dy < step && iy + dy < sy; dy++) {
+              for (let dz = 0; dz < step && iz + dz < sz; dz++) {
+                for (let dx = 0; dx < step && ix + dx < sx; dx++) {
+                  if (dx === 0 && dy === 0 && dz === 0) continue;
+                  volume[index(ix + dx, iy + dy, iz + dz)] = name;
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -79,17 +109,18 @@ export function sampleVoxels(bot: Bot, radius = 20): VoxelField {
   const cz = r;
 
   if (pos) {
-    for (let iy = 0; iy < sy; iy++) {
-      for (let iz = 0; iz < sz; iz++) {
-        for (let ix = 0; ix < sx; ix++) {
+    // Emit only on the step lattice so payload stays small in lite mode
+    for (let iy = 0; iy < sy; iy += step) {
+      for (let iz = 0; iz < sz; iz += step) {
+        for (let ix = 0; ix < sx; ix += step) {
           const name = at(ix, iy, iz);
           if (isAir(name)) continue;
-          const n0 = at(ix - 1, iy, iz);
-          const n1 = at(ix + 1, iy, iz);
-          const n2 = at(ix, iy - 1, iz);
-          const n3 = at(ix, iy + 1, iz);
-          const n4 = at(ix, iy, iz - 1);
-          const n5 = at(ix, iy, iz + 1);
+          const n0 = at(ix - step, iy, iz);
+          const n1 = at(ix + step, iy, iz);
+          const n2 = at(ix, iy - step, iz);
+          const n3 = at(ix, iy + step, iz);
+          const n4 = at(ix, iy, iz - step);
+          const n5 = at(ix, iy, iz + step);
           const neighbors = [n0, n1, n2, n3, n4, n5];
           const buried = neighbors.every((n) => occludes(n) || n === name);
           if (buried && occludes(name)) continue;
@@ -107,7 +138,7 @@ export function sampleVoxels(bot: Bot, radius = 20): VoxelField {
     scored.sort((a, b) => a.dist - b.dist);
   }
 
-  const kept = scored.slice(0, MAX_CELLS);
+  const kept = scored.slice(0, maxCells);
   const cells = new Array<number>(kept.length * 4);
   for (let i = 0; i < kept.length; i++) {
     const [lx, ly, lz, pi] = kept[i]!.cell;
@@ -145,8 +176,16 @@ function collectEntities(bot: Bot): VoxelEntity[] {
       yaw: self.yaw,
     });
   }
+  const loaded = bot.entities ?? {};
   const players = Object.values(bot.players)
-    .filter((player) => player.username !== bot.username && player.entity?.position)
+    .filter((player) => {
+      if (player.username === bot.username) return false;
+      const entity = player.entity;
+      if (!entity?.position) return false;
+      // Must still be in the loaded entity map (not a left-behind ghost)
+      if (entity.id == null || loaded[entity.id] !== entity) return false;
+      return true;
+    })
     .map((player) => {
       const p = player.entity!.position;
       const origin = self?.position;
@@ -155,6 +194,7 @@ function collectEntities(bot: Bot): VoxelEntity[] {
         dist: origin ? origin.distanceTo(p) : 0,
       };
     })
+    .filter((row) => row.dist <= 192)
     .sort((a, b) => a.dist - b.dist)
     .slice(0, 40);
 

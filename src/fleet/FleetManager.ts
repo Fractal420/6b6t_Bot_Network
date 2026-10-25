@@ -30,6 +30,11 @@ export interface FleetBotStatus {
   enabled: boolean;
   features: AccountFeatures;
   featuresSummary: string;
+  profile?: import("./accounts.ts").AccountProfile;
+  auth: "offline" | "microsoft";
+  host?: string;
+  port?: number;
+  notes?: string;
   /** @deprecated */
   task?: BotTask;
   running: boolean;
@@ -95,9 +100,27 @@ export class FleetManager extends EventEmitter {
       accounts: this.accounts,
       defaultAnnouncements: this.defaultAnnouncements,
     });
-    const acc = this.accounts.find((a) => a.username === input.username)!;
+    const username = String(input.username || "").trim();
+    const acc =
+      (input.id ? this.accounts.find((a) => a.id === input.id) : undefined) ||
+      this.accounts.find((a) => a.username.toLowerCase() === username.toLowerCase());
+    if (!acc) throw new Error("account save failed");
+    // If bot is running, push host/user config for next reconnect
+    const live = this.bots.get(acc.id);
+    if (live) {
+      try {
+        live.applyRuntimeConfig(this.configFor(acc));
+      } catch {
+        /* ignore */
+      }
+    }
     this.emit("accounts", this.listAccounts());
-    return { ...acc, password: acc.password ? "***" : "" };
+    this.emit("fleet", this.getFleetStatus());
+    return {
+      ...acc,
+      password: acc.password ? "***" : "",
+      hasPassword: Boolean(acc.password),
+    } as AccountRecord & { hasPassword: boolean };
   }
 
   deleteAccount(id: string): void {
@@ -112,6 +135,8 @@ export class FleetManager extends EventEmitter {
   }
 
   private configFor(account: AccountRecord): FractalConfig {
+    const p = account.profile || {};
+    const mapMode = p.mapMode || account.features.mapMode || this.baseConfig.mapMode;
     return {
       ...this.baseConfig,
       username: account.username,
@@ -119,6 +144,24 @@ export class FleetManager extends EventEmitter {
       auth: account.auth,
       host: account.host || this.baseConfig.host,
       port: account.port ?? this.baseConfig.port,
+      viewDistance: p.viewDistance ?? this.baseConfig.viewDistance,
+      mapOutputDir: p.mapOutputDir || this.baseConfig.mapOutputDir,
+      mapMode,
+      mapHomeName: p.mapHomeName || this.baseConfig.mapHomeName,
+      mapBox: p.mapBox || this.baseConfig.mapBox,
+      mapAutoStart: p.mapAutoStart ?? this.baseConfig.mapAutoStart,
+      reconnectMs: p.reconnectMs ?? this.baseConfig.reconnectMs,
+      reconnectMaxMs: p.reconnectMaxMs ?? this.baseConfig.reconnectMaxMs,
+      rateLimitCooldownMs: p.rateLimitCooldownMs ?? this.baseConfig.rateLimitCooldownMs,
+      captchaCooldownMs: p.captchaCooldownMs ?? this.baseConfig.captchaCooldownMs,
+      requiredServerPortals: p.requiredServerPortals ?? this.baseConfig.requiredServerPortals,
+      portalRetryMs: p.portalRetryMs ?? this.baseConfig.portalRetryMs,
+      detectionRecheckMs: p.detectionRecheckMs ?? this.baseConfig.detectionRecheckMs,
+      detectionPlayers: p.detectionPlayers ?? this.baseConfig.detectionPlayers,
+      detectionCrystals: p.detectionCrystals ?? this.baseConfig.detectionCrystals,
+      detectionTnt: p.detectionTnt ?? this.baseConfig.detectionTnt,
+      detectionExplosions: p.detectionExplosions ?? this.baseConfig.detectionExplosions,
+      detectionCombat: p.detectionCombat ?? this.baseConfig.detectionCombat,
     };
   }
 
@@ -129,7 +172,20 @@ export class FleetManager extends EventEmitter {
         this.emit("fleet", this.getFleetStatus());
       });
     };
-    for (const e of ["phase", "kicked", "connected", "disconnected", "status", "authenticated", "chat"] as const) {
+    for (const e of [
+      "phase",
+      "kicked",
+      "connected",
+      "disconnected",
+      "status",
+      "authenticated",
+      "chat",
+      "detection",
+      "portalEntered",
+      "portalFound",
+      "worldKind",
+      "error",
+    ] as const) {
       forward(e);
     }
   }
@@ -151,37 +207,30 @@ export class FleetManager extends EventEmitter {
     const account = this.accounts.find((a) => a.id === id);
     if (!account) return `unknown account ${id}`;
     if (!account.username) return "account missing username";
-    if (account.auth === "offline" && !account.password) return "account missing password";
+    if (account.auth !== "microsoft" && !account.password) {
+      return `account "${account.username}" has no password — edit the profile and set one before starting`;
+    }
 
     let bot = this.bots.get(id);
     if (!bot) {
       bot = new FractalBot(this.configFor(account));
       this.wireBot(id, bot);
       this.bots.set(id, bot);
+    } else {
+      bot.applyRuntimeConfig(this.configFor(account));
     }
 
     account.enabled = true;
-    if (!account.features.online) {
-      account.features = normalizeFeatures({ ...account.features, online: true });
-    }
+    // Activate profile only — do NOT join the server.
+    // Connecting is exclusively controlled by the Online switch.
     saveAccountsFile({
       version: 2,
       accounts: this.accounts,
       defaultAnnouncements: this.defaultAnnouncements,
     });
 
-    await bot.join({
-      autoLobby: true,
-      autoReconnect: true,
-      username: account.username,
-      password: account.password,
-      host: account.host || this.baseConfig.host,
-      port: account.port ?? this.baseConfig.port,
-    });
-
-    await this.applyFeatures(id);
     this.emit("fleet", this.getFleetStatus());
-    return `started ${account.username} [${featuresSummary(account.features)}]`;
+    return `profile ready: ${account.username} — turn Online on to connect`;
   }
 
   async stopBot(id: string): Promise<string> {
@@ -199,6 +248,7 @@ export class FleetManager extends EventEmitter {
     }
     if (account) {
       account.enabled = false;
+      // Do not change Online task flag — user controls that on Tasks
       saveAccountsFile({
         version: 2,
         accounts: this.accounts,
@@ -206,18 +256,17 @@ export class FleetManager extends EventEmitter {
       });
     }
     this.emit("fleet", this.getFleetStatus());
-    return `stopped ${id}`;
+    return `stopped ${account?.username || id}`;
   }
 
   async startAllEnabled(): Promise<string[]> {
     const out: string[] = [];
     for (const a of this.accounts) {
-      if (!a.enabled && !a.features.online) continue;
-      // Start accounts that want to be online
-      if (!a.features.online && !a.enabled) continue;
+      if (!a.features.online) continue;
       try {
-        if (!a.features.online) continue;
         out.push(await this.startBot(a.id));
+        // Online is already on for these accounts — connect them
+        out.push(await this.applyFeatures(a.id));
       } catch (e) {
         out.push(`${a.username}: ${e instanceof Error ? e.message : e}`);
       }
@@ -236,7 +285,8 @@ export class FleetManager extends EventEmitter {
   }
 
   resolveBot(id?: string | null): FractalBot | null {
-    if (id && this.bots.has(id)) return this.bots.get(id)!;
+    // Explicit id: only that bot (no silent fallback to another profile)
+    if (id) return this.bots.get(id) ?? null;
     for (const b of this.bots.values()) return b;
     return null;
   }
@@ -256,7 +306,23 @@ export class FleetManager extends EventEmitter {
       accounts: this.accounts,
       defaultAnnouncements: this.defaultAnnouncements,
     });
-    const msg = await this.applyFeatures(id);
+    // Online on: ensure bot instance exists (no join yet — applyFeatures connects)
+    if (account.features.online && !this.bots.has(id)) {
+      if (account.auth !== "microsoft" && !account.password) {
+        return `account "${account.username}" has no password — set one before going Online`;
+      }
+      const bot = new FractalBot(this.configFor(account));
+      this.wireBot(id, bot);
+      this.bots.set(id, bot);
+      account.enabled = true;
+      saveAccountsFile({
+        version: 2,
+        accounts: this.accounts,
+        defaultAnnouncements: this.defaultAnnouncements,
+      });
+    }
+    // Online off must always disconnect
+    const msg = await this.applyFeatures(id, { skipDisconnect: false });
     this.emit("fleet", this.getFleetStatus());
     return msg;
   }
@@ -273,7 +339,10 @@ export class FleetManager extends EventEmitter {
     return this.setFeatures(id, partial);
   }
 
-  private async applyFeatures(id: string): Promise<string> {
+  private async applyFeatures(
+    id: string,
+    opts: { skipDisconnect?: boolean } = {},
+  ): Promise<string> {
     const account = this.accounts.find((a) => a.id === id);
     if (!account) return "no account";
     const f = normalizeFeatures(account.features);
@@ -290,22 +359,38 @@ export class FleetManager extends EventEmitter {
         } catch {
           /* ignore */
         }
+        // Stop movement/portal walk without clearing the autoLobby preference
         try {
-                  } catch {
+          bot.setFlags({ autoReconnect: false });
+        } catch {
           /* ignore */
         }
-        await bot.leave("features-offline");
+        if (!opts.skipDisconnect) {
+          await bot.leave("features-offline");
+        }
       }
-      return `${label}: offline`;
+      return opts.skipDisconnect
+        ? `${label}: ready (Online is off)`
+        : `${label}: offline`;
     }
 
     if (!bot) {
-      return `${label}: features saved [${featuresSummary(f)}] — start bot to run`;
+      return `${label}: features saved [${featuresSummary(f)}] — press Start to run`;
     }
 
-    bot.setFlags({ autoLobby: true, autoReconnect: true });
+    // Online implies reconnect; autoLobby stays whatever the user set (default on)
+    const autoLobby = account.profile?.autoLobby !== false;
+    const autoReconnect = true;
+    bot.setFlags({ autoLobby, autoReconnect });
     if (!bot.getStatus().connected) {
-      await bot.join();
+      await bot.join({
+        autoLobby,
+        autoReconnect,
+        username: account.username,
+        password: account.password,
+        host: account.host || this.baseConfig.host,
+        port: account.port ?? this.baseConfig.port,
+      });
     }
 
     // Hunt vs map: map wins (already normalized)
@@ -380,6 +465,7 @@ export class FleetManager extends EventEmitter {
       bots: this.accounts.map((a) => {
         const bot = this.bots.get(a.id);
         const features = normalizeFeatures(a.features);
+        const status = bot ? bot.getStatus() : null;
         return {
           id: a.id,
           label: a.label,
@@ -387,8 +473,15 @@ export class FleetManager extends EventEmitter {
           enabled: a.enabled,
           features,
           featuresSummary: featuresSummary(features),
-          running: Boolean(bot?.getStatus().connected || bot),
-          bot: bot ? bot.getStatus() : null,
+          profile: a.profile || {},
+          auth: a.auth,
+          host: a.host,
+          port: a.port,
+          notes: a.notes,
+          hasPassword: Boolean(a.password),
+          running: Boolean(bot && (status?.connected || status?.phase !== "idle")),
+          bot: status,
+          announcementMessages: a.announcementMessages,
         };
       }),
     };

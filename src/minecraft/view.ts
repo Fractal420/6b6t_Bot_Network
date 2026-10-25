@@ -73,8 +73,14 @@ export function cursorEntity(bot: Bot, maxDistance = 6): EntityInfo | null {
 
 export function listEntities(bot: Bot, limit = 48): EntityInfo[] {
   const rows: EntityInfo[] = [];
-  for (const entity of Object.values(bot.entities)) {
+  const entities = bot.entities ? Object.values(bot.entities) : [];
+  const origin = bot.entity?.position;
+  for (const entity of entities) {
     if (!entity?.position || entity === bot.entity) continue;
+    // Skip ghosts that stayed in the map after unload (common on Velocity /
+    // high-latency anarchy transfers). Farther than ~192 is outside normal
+    // player view and almost always stale.
+    if (origin && origin.distanceTo(entity.position) > 192) continue;
     rows.push(describeEntity(bot, entity));
   }
   rows.sort((a, b) => (a.distance ?? 9e9) - (b.distance ?? 9e9));

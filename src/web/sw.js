@@ -25,23 +25,40 @@ self.addEventListener("notificationclick", (event) => {
 
 self.addEventListener("message", (event) => {
   const data = event.data || {};
-  if (data.type !== "captcha-notify") return;
-  const title = data.title || "6b6t captcha";
-  const body = data.body || "Solve the captcha, then rejoin.";
-  const link = data.link || null;
-  event.waitUntil(
-    self.registration.showNotification(title, {
-      body,
-      tag: "fractal-captcha",
-      renotify: true,
-      requireInteraction: true,
-      data: { url: "/", link },
-      actions: link
-        ? [
-            { action: "open", title: "Open captcha" },
-            { action: "dashboard", title: "Open dashboard" },
-          ]
-        : [{ action: "dashboard", title: "Open dashboard" }],
-    }),
-  );
+  if (data.type === "captcha-notify") {
+    const title = data.title || "6b6t captcha";
+    const body = data.body || "Solve the captcha, then rejoin.";
+    const link = data.link || null;
+    event.waitUntil(
+      self.registration.showNotification(title, {
+        body,
+        tag: "fractal-captcha",
+        renotify: true,
+        requireInteraction: true,
+        data: { url: data.url || "/#detect", link },
+        actions: link
+          ? [
+              { action: "open", title: "Open captcha" },
+              { action: "dashboard", title: "Open dashboard" },
+            ]
+          : [{ action: "dashboard", title: "Open dashboard" }],
+      }),
+    );
+    return;
+  }
+  if (data.type === "detection-notify") {
+    const title = data.title || "Detection";
+    const body = data.body || "";
+    const tag = data.tag || "fractal-detection";
+    event.waitUntil(
+      self.registration.showNotification(title, {
+        body,
+        tag,
+        renotify: true,
+        requireInteraction: false,
+        data: { url: data.url || "/#detect" },
+        actions: [{ action: "dashboard", title: "Open Detect" }],
+      }),
+    );
+  }
 });

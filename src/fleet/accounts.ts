@@ -1,11 +1,18 @@
 /**
- * Multi-account registry (accounts.json).
+ * Multi-account registry — one profile file each under Settings/Profiles/.
  * Features are stackable; only mutually exclusive jobs conflict.
  */
-import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { configPath } from "../config.ts";
+import {
+  loadAllProfiles,
+  saveAllProfiles,
+  loadAnnouncements,
+  saveAnnouncements,
+  migrateLegacyAccountsIfNeeded,
+  profilesDir,
+  settingsDir,
+} from "../settings/store.ts";
 
 /** Legacy single-task names (still accepted when loading old files). */
 export type BotTask = "idle" | "join" | "hunt" | "map"  | "leave";
@@ -38,6 +45,37 @@ export interface AccountFeatures {
   antiAfk: boolean;
 }
 
+/**
+ * Per-account profile overrides (isolated from global .env).
+ * Undefined fields fall back to the process-level FractalConfig.
+ */
+export interface AccountProfile {
+  autoLobby?: boolean;
+  autoReconnect?: boolean;
+  viewDistance?: number;
+  /** Protocol version override for this bot */
+  version?: string;
+  /** Mapper output directory for this bot only */
+  mapOutputDir?: string;
+  mapMode?: string;
+  mapHomeName?: string;
+  mapBox?: { x1: number; z1: number; x2: number; z2: number };
+  mapAutoStart?: boolean;
+  reconnectMs?: number;
+  reconnectMaxMs?: number;
+  rateLimitCooldownMs?: number;
+  captchaCooldownMs?: number;
+  requiredServerPortals?: number;
+  portalRetryMs?: number;
+  /** Re-scan loaded players every N ms (teleport / chunk unload misses entityGone). */
+  detectionRecheckMs?: number;
+  detectionPlayers?: boolean;
+  detectionCrystals?: boolean;
+  detectionTnt?: boolean;
+  detectionExplosions?: boolean;
+  detectionCombat?: boolean;
+}
+
 export interface AccountRecord {
   id: string;
   username: string;
@@ -47,12 +85,15 @@ export interface AccountRecord {
   port?: number;
   enabled: boolean;
   features: AccountFeatures;
+  /** Independent settings for this bot profile */
+  profile?: AccountProfile;
   /** Optional per-account announcement list (else global defaults). */
   announcementMessages?: AnnouncementItem[];
   /** @deprecated kept for migration */
   task?: BotTask;
   taskOptions?: { mapMode?: string };
   label?: string;
+  notes?: string;
 }
 
 export interface AccountsFile {
@@ -63,7 +104,7 @@ export interface AccountsFile {
 }
 
 const DEFAULT_FEATURES: AccountFeatures = {
-  online: true,
+  online: false,
   hunt: false,
   map: false,
   mapMode: "box",
@@ -72,8 +113,16 @@ const DEFAULT_FEATURES: AccountFeatures = {
 };
 
 function accountsPath(): string {
-  const envPath = configPath();
-  return path.join(path.dirname(envPath), "accounts.json");
+  return profilesDir();
+}
+
+function legacyAccountsJsonPath(): string {
+  // Old single-file store next to package root / cwd
+  const candidates = [
+    path.join(settingsDir(), "..", "accounts.json"),
+    path.join(process.cwd(), "accounts.json"),
+  ];
+  return candidates[0];
 }
 
 export function defaultFeatures(): AccountFeatures {
@@ -133,6 +182,7 @@ function normalizeAccount(a: Partial<AccountRecord>): AccountRecord {
   if (a.taskOptions?.mapMode && !a.features?.mapMode) {
     features.mapMode = a.taskOptions.mapMode;
   }
+  const profile = normalizeProfile(a.profile);
   return {
     id: a.id || randomUUID(),
     username: String(a.username || ""),
@@ -142,34 +192,57 @@ function normalizeAccount(a: Partial<AccountRecord>): AccountRecord {
     port: typeof a.port === "number" ? a.port : undefined,
     enabled: a.enabled !== false,
     features,
+    profile: Object.keys(profile).length ? profile : undefined,
     announcementMessages: Array.isArray(a.announcementMessages)
       ? a.announcementMessages.filter((x) => x && x.message && x.intervalMs > 0)
       : undefined,
     label: a.label || undefined,
+    notes: a.notes ? String(a.notes) : undefined,
   };
 }
 
-export function loadAccountsFile(): AccountsFile {
-  const p = accountsPath();
-  if (!fs.existsSync(p)) {
-    return { version: 2, accounts: [], defaultAnnouncements: defaultAnnouncementPreset() };
-  }
-  try {
-    const raw = JSON.parse(fs.readFileSync(p, "utf8")) as AccountsFile;
-    if (!raw || !Array.isArray(raw.accounts)) {
-      return { version: 2, accounts: [], defaultAnnouncements: defaultAnnouncementPreset() };
+function normalizeProfile(p: Partial<AccountProfile> | undefined): AccountProfile {
+  if (!p || typeof p !== "object") return {};
+  const out: AccountProfile = {};
+  if (typeof p.autoLobby === "boolean") out.autoLobby = p.autoLobby;
+  if (typeof p.autoReconnect === "boolean") out.autoReconnect = p.autoReconnect;
+  if (typeof p.viewDistance === "number" && Number.isFinite(p.viewDistance)) out.viewDistance = p.viewDistance;
+  if (typeof p.version === "string" && p.version.trim()) out.version = p.version.trim();
+  if (typeof p.mapOutputDir === "string" && p.mapOutputDir.trim()) out.mapOutputDir = p.mapOutputDir.trim();
+  if (typeof p.mapMode === "string" && p.mapMode.trim()) out.mapMode = p.mapMode.trim();
+  if (typeof p.mapHomeName === "string" && p.mapHomeName.trim()) out.mapHomeName = p.mapHomeName.trim();
+  if (p.mapBox && typeof p.mapBox === "object") {
+    const b = p.mapBox;
+    if ([b.x1, b.z1, b.x2, b.z2].every((n) => typeof n === "number" && Number.isFinite(n))) {
+      out.mapBox = { x1: b.x1, z1: b.z1, x2: b.x2, z2: b.z2 };
     }
-    return {
-      version: 2,
-      accounts: raw.accounts.map(normalizeAccount),
-      defaultAnnouncements:
-        Array.isArray(raw.defaultAnnouncements) && raw.defaultAnnouncements.length
-          ? raw.defaultAnnouncements
-          : defaultAnnouncementPreset(),
-    };
-  } catch {
-    return { version: 2, accounts: [], defaultAnnouncements: defaultAnnouncementPreset() };
   }
+  if (typeof p.mapAutoStart === "boolean") out.mapAutoStart = p.mapAutoStart;
+  for (const k of ["reconnectMs", "reconnectMaxMs", "rateLimitCooldownMs", "captchaCooldownMs", "requiredServerPortals", "portalRetryMs", "detectionRecheckMs"] as const) {
+    const v = p[k];
+    if (typeof v === "number" && Number.isFinite(v) && v >= 0) out[k] = v;
+  }
+  for (const k of ["detectionPlayers", "detectionCrystals", "detectionTnt", "detectionExplosions", "detectionCombat"] as const) {
+    if (typeof p[k] === "boolean") out[k] = p[k];
+  }
+  return out;
+}
+
+export function loadAccountsFile(): AccountsFile {
+  // Migrate legacy accounts.json → Settings/Profiles/*.json once
+  migrateLegacyAccountsIfNeeded(legacyAccountsJsonPath());
+  migrateLegacyAccountsIfNeeded(path.join(process.cwd(), "accounts.json"));
+
+  const accounts = loadAllProfiles().map((raw) => normalizeAccount(raw as Partial<AccountRecord>));
+  const announcements = loadAnnouncements();
+  return {
+    version: 2,
+    accounts,
+    defaultAnnouncements:
+      announcements.defaultAnnouncements?.length > 0
+        ? announcements.defaultAnnouncements
+        : defaultAnnouncementPreset(),
+  };
 }
 
 export function defaultAnnouncementPreset(): AnnouncementItem[] {
@@ -179,18 +252,11 @@ export function defaultAnnouncementPreset(): AnnouncementItem[] {
 }
 
 export function saveAccountsFile(data: AccountsFile): void {
-  const p = accountsPath();
-  const payload: AccountsFile = {
-    version: 2,
-    accounts: data.accounts,
+  saveAllProfiles(data.accounts as unknown as Array<Record<string, unknown>>);
+  saveAnnouncements({
+    version: 1,
     defaultAnnouncements: data.defaultAnnouncements ?? defaultAnnouncementPreset(),
-  };
-  fs.writeFileSync(p, JSON.stringify(payload, null, 2) + "\n", { mode: 0o600 });
-  try {
-    fs.chmodSync(p, 0o600);
-  } catch {
-    /* ignore */
-  }
+  });
 }
 
 export function accountsFilePath(): string {
@@ -201,18 +267,65 @@ export function upsertAccount(
   accounts: AccountRecord[],
   input: Partial<AccountRecord> & { username: string },
 ): AccountRecord[] {
-  const id = input.id || randomUUID();
-  const existing = accounts.findIndex((a) => a.id === id || a.username === input.username);
+  const username = String(input.username || "").trim();
+  if (!username) {
+    throw new Error("username is required");
+  }
+
+  // Prefer match by id; never silently merge two different profiles by username
+  let existing = -1;
+  if (input.id) {
+    existing = accounts.findIndex((a) => a.id === input.id);
+  }
+
+  if (existing < 0) {
+    // Creating a new account (or id not found): reject duplicate username
+    const dup = accounts.findIndex((a) => a.username.toLowerCase() === username.toLowerCase());
+    if (dup >= 0 && (!input.id || accounts[dup].id !== input.id)) {
+      throw new Error(`username "${username}" already exists on another profile`);
+    }
+  } else {
+    // Updating: if username changes, ensure no other profile owns it
+    const dup = accounts.findIndex(
+      (a, i) => i !== existing && a.username.toLowerCase() === username.toLowerCase(),
+    );
+    if (dup >= 0) {
+      throw new Error(`username "${username}" already exists on another profile`);
+    }
+  }
+
+  const id = existing >= 0 ? accounts[existing].id : input.id || randomUUID();
   const base = existing >= 0 ? accounts[existing] : {};
   const mergedFeatures = normalizeFeatures({
     ...(base as AccountRecord).features,
-    ...input.features,
+    ...(input.features || {}),
   });
+  const mergedProfile = {
+    ...((base as AccountRecord).profile || {}),
+    ...(input.profile || {}),
+  };
+  const password =
+    input.password !== undefined && input.password !== "" && input.password !== "***"
+      ? input.password
+      : (base as AccountRecord).password || "";
+
+  // Preserve enabled/features when not provided on update
+  const enabled =
+    input.enabled !== undefined
+      ? Boolean(input.enabled)
+      : existing >= 0
+        ? (base as AccountRecord).enabled
+        : false;
+
   const next = normalizeAccount({
     ...base,
     ...input,
+    username,
+    password,
     features: mergedFeatures,
-    id: existing >= 0 ? (base as AccountRecord).id : id,
+    profile: mergedProfile,
+    id,
+    enabled,
   });
   if (existing >= 0) {
     const copy = accounts.slice();

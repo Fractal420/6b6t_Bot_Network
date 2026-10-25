@@ -16,7 +16,7 @@ import { createPortalNavigator, type PortalNavigator } from "../minecraft/lobby/
 import { classifyWorld, isLobbyLike, isMainWorld } from "../minecraft/lobby/worldKind.ts";
 import { dumpWorld, persistDump, topBlockCounts } from "../minecraft/probe.ts";
 import { findPortalBlocks } from "../minecraft/lobby/portals.ts";
-import { clampVoxelRadius, sampleVoxels } from "../minecraft/voxels.ts";
+import { clampVoxelRadius, sampleVoxels, type VoxelQuality } from "../minecraft/voxels.ts";
 import { createMapperBridge, type MapperHost, type MapperStatus } from "../mapper/bridge.ts";
 /** Corrupt-chunk / deserializer errors that vanilla clients ignore — stay connected. */
 const RECOVERABLE_PARSE_RE =
@@ -40,6 +40,7 @@ import type {
   BotStatus,
   BlockInfo,
   ControlState,
+  DetectionEvent,
   EntityInfo,
   EquipmentDest,
   InventorySlot,
@@ -79,6 +80,13 @@ export class FractalBot extends EventEmitter {
   private faultJoinGeneration = -1;
   private reachedLogin = false;
   private lastChat?: string;
+  private lastChatAt = 0;
+  /** Recent detection events (players in range, crystals, TNT). */
+  private detectionLog: DetectionEvent[] = [];
+  /** Entity ids currently tracked as in-range players. */
+  private nearbyPlayers = new Map<number, { username: string; enteredAt: number }>();
+  /** Periodic sweep so teleports / missed entityGone still emit leave events. */
+  private detectionRecheckTimer: NodeJS.Timeout | null = null;
   private joinGeneration = 0;
   private leaving = false;
   private password: string;
@@ -133,6 +141,10 @@ export class FractalBot extends EventEmitter {
       noHomeRadius: 5000,
       homeCooldownSec: 315,
     });
+    // Live-update detection recheck cadence if a session is already wired
+    if (this.bot && this.detectionRecheckTimer) {
+      this.restartDetectionRecheck(this.bot, this.joinGeneration);
+    }
     this.emit("status", this.getStatus());
   }
 
@@ -168,7 +180,7 @@ export class FractalBot extends EventEmitter {
       health: bot?.health,
       food: bot?.food,
       ping: bot?.player?.ping,
-      players: bot ? Object.keys(bot.players).length : 0,
+      players: bot?.players ? Object.keys(bot.players).length : 0,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
       lastKick: this.lastKick,
       lastKickKind: this.lastKickKind,
@@ -392,8 +404,29 @@ export class FractalBot extends EventEmitter {
   getPlayers(): PlayerInfo[] {
     const bot = this.requireBot();
     const origin = bot.entity?.position;
-    return Object.values(bot.players).map((player) => {
-      const entityPos = player.entity?.position;
+    const loaded = bot.entities ?? {};
+    const self = (bot.username || "").toLowerCase();
+    const players = bot.players
+      ? Object.values(bot.players).filter((p) => (p.username || "").toLowerCase() !== self)
+      : [];
+    return players.map((player) => {
+      // Tab list keeps every player on the server. Only attach pose when the
+      // entity is still present in bot.entities — otherwise we keep showing
+      // last-known coords of people who already left render distance.
+      const entity = player.entity;
+      const stillLoaded =
+        !!entity?.position &&
+        entity.id != null &&
+        loaded[entity.id] === entity;
+      if (entity && !stillLoaded) {
+        // Drop the stale reference so later reads stay clean
+        try {
+          (player as { entity?: unknown }).entity = undefined;
+        } catch {
+          /* ignore */
+        }
+      }
+      const entityPos = stillLoaded ? entity!.position : undefined;
       return {
         username: player.username,
         uuid: player.uuid,
@@ -401,9 +434,580 @@ export class FractalBot extends EventEmitter {
         gamemode: player.gamemode !== undefined ? String(player.gamemode) : undefined,
         distance: origin && entityPos ? origin.distanceTo(entityPos) : undefined,
         position: entityPos ? roundVec(entityPos) : undefined,
-        yaw: player.entity?.yaw,
+        yaw: stillLoaded ? entity!.yaw : undefined,
       };
     });
+  }
+
+  /** Detection event ring buffer (players, crystals, TNT). */
+  getDetection(): { events: DetectionEvent[]; nearby: Array<{ username: string; enteredAt: number }> } {
+    // Opportunistic sync so UI poll fills the log even if an interval tick was missed
+    if (this.bot) {
+      try {
+        this.recheckNearbyPlayers(this.bot);
+      } catch {
+        /* ignore */
+      }
+    }
+    return {
+      events: this.detectionLog.slice(),
+      nearby: [...this.nearbyPlayers.values()].map((p) => ({
+        username: p.username,
+        enteredAt: p.enteredAt,
+      })),
+    };
+  }
+
+  /**
+   * Wipe the detection event log and re-emit enter for everyone currently in render range.
+   * Clears tracking so a Clear from the UI is not stuck with "already tracked" and no new lines.
+   */
+  clearDetectionLog(): void {
+    this.detectionLog.length = 0;
+    this.nearbyPlayers.clear();
+    const bot = this.bot;
+    if (bot) {
+      try {
+        this.recheckNearbyPlayers(bot);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private pushDetection(event: Omit<DetectionEvent, "at" | "id">): void {
+    const full: DetectionEvent = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      at: new Date().toISOString(),
+      ...event,
+    };
+    this.detectionLog.unshift(full);
+    if (this.detectionLog.length > 200) this.detectionLog.length = 200;
+    this.emit("detection", full);
+  }
+
+  private clearDetectionRecheck(): void {
+    if (this.detectionRecheckTimer) {
+      clearInterval(this.detectionRecheckTimer);
+      this.detectionRecheckTimer = null;
+    }
+  }
+
+  private restartDetectionRecheck(bot: Bot, generation: number): void {
+    this.clearDetectionRecheck();
+    const interval = Math.max(500, this.config.detectionRecheckMs || 3_000);
+    this.detectionRecheckTimer = setInterval(() => {
+      if (generation !== this.joinGeneration || !this.bot) return;
+      try {
+        this.recheckNearbyPlayers(bot);
+      } catch {
+        /* ignore */
+      }
+    }, interval);
+  }
+
+  /** Strip legacy § / & / $ color+format codes and whitespace from a name. */
+  private static cleanMinecraftName(raw: string): string {
+    let s = String(raw || "");
+    // §X and unicode section sign, plus $X / &X variants some stacks emit
+    s = s.replace(/[\u00A7§][0-9A-FK-ORa-fk-or]/g, "");
+    s = s.replace(/[\$&][0-9A-FK-ORa-fk-or]/g, "");
+    // JSON-ish leftover fragments
+    s = s.replace(/\{(?:text|color|bold|italic|extra)[^}]*\}/gi, "");
+    s = s.replace(/\s+/g, " ").trim();
+    return s;
+  }
+
+  /**
+   * True if this looks like a real Java account name (not lobby NPC / hologram junk).
+   * 6b usernames are typically 1–16 [A-Za-z0-9_]; allow up to 32 + . -
+   */
+  private static isPlausiblePlayerName(name: string): boolean {
+    if (!name || name.length < 1 || name.length > 32) return false;
+    if (/\s/.test(name)) return false; // "Captain Morgan" style NPCs
+    if (/^CIT-/i.test(name)) return false;
+    if (/^player#/i.test(name)) return false;
+    if (!/^[A-Za-z0-9_.-]+$/.test(name)) return false;
+    // Reject pure hex garbage from nametag components
+    if (/^[0-9a-f]{8,}$/i.test(name)) return false;
+    return true;
+  }
+
+  /**
+   * Resolve a clean tab-list username for a loaded player entity.
+   * Returns null for NPCs / holograms / unresolvable entities (skip detection).
+   */
+  private resolvePlayerUsername(
+    bot: Bot,
+    entity: { id?: number; username?: string; name?: string; type?: string },
+  ): string | null {
+    const self = (bot.username || "").toLowerCase();
+
+    // Prefer tab list (always the real account name on 6b)
+    try {
+      for (const p of Object.values(bot.players || {})) {
+        if (p.entity?.id === entity.id && p.username) {
+          const cleaned = FractalBot.cleanMinecraftName(p.username);
+          if (FractalBot.isPlausiblePlayerName(cleaned) && cleaned.toLowerCase() !== self) {
+            return cleaned;
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
+    if (entity.username) {
+      const cleaned = FractalBot.cleanMinecraftName(entity.username);
+      if (FractalBot.isPlausiblePlayerName(cleaned) && cleaned.toLowerCase() !== self) {
+        return cleaned;
+      }
+    }
+
+    // Match tab-list entry by username string if entity id not linked yet
+    try {
+      const guess = FractalBot.cleanMinecraftName(entity.username || "");
+      if (guess) {
+        for (const p of Object.values(bot.players || {})) {
+          if (p.username && p.username.toLowerCase() === guess.toLowerCase()) {
+            const cleaned = FractalBot.cleanMinecraftName(p.username);
+            if (FractalBot.isPlausiblePlayerName(cleaned) && cleaned.toLowerCase() !== self) {
+              return cleaned;
+            }
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+
+    return null;
+  }
+
+  private isPlayerEntity(entity: { type?: string; name?: string; username?: string }): boolean {
+    if (entity.type === "player") return true;
+    const n = String(entity.name || "").toLowerCase();
+    if (n === "player") return true;
+    // Some protocol paths only set username
+    if (entity.username && entity.type !== "mob" && entity.type !== "object") return true;
+    return false;
+  }
+
+  /**
+   * Sweep tab-list players that still have a loaded entity (same source as Play → Nearby).
+   * After teleports / dimension changes, entityGone is often missed — this emits leave/enter to stay in sync.
+   */
+  private recheckNearbyPlayers(bot: Bot): void {
+    // Default on — only skip when explicitly disabled
+    if (this.config.detectionPlayers === false) return;
+    const self = (bot.username || "").toLowerCase();
+    const origin = bot.entity?.position;
+    const loaded = bot.entities || {};
+    const seen = new Set<number>();
+
+    for (const player of Object.values(bot.players || {})) {
+      const rawName = player?.username ? FractalBot.cleanMinecraftName(String(player.username)) : "";
+      if (!rawName || rawName.toLowerCase() === self) continue;
+      // Soft filter: allow any non-empty tab name without spaces (matches Nearby panel)
+      if (/\s/.test(rawName) || rawName.length > 32) continue;
+
+      const entity = player.entity;
+      // Accept entity if it is still referenced in bot.entities (by id), even if object identity drifted
+      const byId = entity?.id != null ? loaded[entity.id] : undefined;
+      const live = byId && byId.position ? byId : entity?.position ? entity : null;
+      if (!live?.position || live.id == null) continue;
+      const id = live.id;
+
+      seen.add(id);
+      if (this.nearbyPlayers.has(id)) {
+        const prev = this.nearbyPlayers.get(id)!;
+        if (prev.username !== rawName) prev.username = rawName;
+        continue;
+      }
+
+      const pos = {
+        x: Math.round(live.position.x),
+        y: Math.round(live.position.y),
+        z: Math.round(live.position.z),
+      };
+      const dist = origin ? Number(origin.distanceTo(live.position).toFixed(1)) : undefined;
+      this.nearbyPlayers.set(id, { username: rawName, enteredAt: Date.now() });
+      this.pushDetection({
+        kind: "player_enter",
+        label: rawName,
+        message: `${rawName} entered range${dist != null ? ` (${dist}m)` : ""}`,
+        position: pos,
+        distance: dist,
+      });
+    }
+
+    for (const [id, prev] of [...this.nearbyPlayers.entries()]) {
+      if (seen.has(id)) continue;
+      this.nearbyPlayers.delete(id);
+      this.pushDetection({
+        kind: "player_leave",
+        label: prev.username,
+        message: `${prev.username} left range`,
+      });
+    }
+  }
+
+  /** Force leave for everyone tracked (dimension / portal hop), then optional reseed. */
+  private flushNearbyPlayers(reason: string): void {
+    if (!this.nearbyPlayers.size) return;
+    for (const [, prev] of [...this.nearbyPlayers.entries()]) {
+      this.pushDetection({
+        kind: "player_leave",
+        label: prev.username,
+        message: `${prev.username} left range (${reason})`,
+      });
+    }
+    this.nearbyPlayers.clear();
+  }
+
+  private wireDetection(bot: Bot, generation: number): void {
+    this.nearbyPlayers.clear();
+    this.clearDetectionRecheck();
+
+    const entityLabel = (entity: { name?: string; displayName?: unknown }): string => {
+      const n = String(entity.name || "").toLowerCase();
+      if (n) return n;
+      try {
+        const d = entity.displayName as { toString?: () => string } | string | undefined;
+        if (typeof d === "string") return d.toLowerCase();
+        if (d && typeof d.toString === "function") return d.toString().toLowerCase();
+      } catch {
+        /* ignore */
+      }
+      return "";
+    };
+
+    const isCrystal = (name: string) =>
+      name.includes("crystal") || name === "ender_crystal" || name === "end_crystal";
+    const isTnt = (name: string) =>
+      name === "tnt" || name === "primed_tnt" || name.includes("tnt");
+
+    const playerName = (entity: {
+      username?: string;
+      name?: string;
+      id?: number;
+      type?: string;
+    }): string | null => this.resolvePlayerUsername(bot, entity);
+
+    const notePlayerEnter = (entity: {
+      id?: number;
+      username?: string;
+      name?: string;
+      type?: string;
+      position?: { x: number; y: number; z: number };
+    }) => {
+      if (this.config.detectionPlayers === false) return;
+      if (entity.id == null) return;
+      if (this.nearbyPlayers.has(entity.id)) return;
+      const username = playerName(entity);
+      if (!username) return; // skip NPCs / color-junk / non-tab players
+      const enteredAt = Date.now();
+      this.nearbyPlayers.set(entity.id, { username, enteredAt });
+      const pos = entity.position
+        ? {
+            x: Math.round(entity.position.x),
+            y: Math.round(entity.position.y),
+            z: Math.round(entity.position.z),
+          }
+        : undefined;
+      const dist =
+        bot.entity?.position && entity.position
+          ? Number(bot.entity.position.distanceTo(entity.position).toFixed(1))
+          : undefined;
+      this.pushDetection({
+        kind: "player_enter",
+        label: username,
+        message: `${username} entered range${dist != null ? ` (${dist}m)` : ""}`,
+        position: pos,
+        distance: dist,
+      });
+    };
+
+    const notePlayerLeave = (entityId: number, fallbackName?: string) => {
+      if (this.config.detectionPlayers === false) return;
+      const prev = this.nearbyPlayers.get(entityId);
+      if (!prev) return; // never tracked → don't emit orphan leave
+      const username = prev.username;
+      this.nearbyPlayers.delete(entityId);
+      this.pushDetection({
+        kind: "player_leave",
+        label: username,
+        message: `${username} left range`,
+      });
+      void fallbackName;
+    };
+
+    bot.on("entitySpawn", (entity) => {
+      if (generation !== this.joinGeneration) return;
+      try {
+        const name = entityLabel(entity);
+        if (this.isPlayerEntity(entity)) {
+          // Username often arrives a tick after spawn — retry once shortly
+          notePlayerEnter(entity);
+          if (entity.id != null && !this.nearbyPlayers.has(entity.id)) {
+            setTimeout(() => {
+              if (generation !== this.joinGeneration) return;
+              try {
+                notePlayerEnter(entity);
+              } catch {
+                /* ignore */
+              }
+            }, 250);
+          }
+          return;
+        }
+        if (this.config.detectionCrystals && isCrystal(name)) {
+          const pos = entity.position
+            ? {
+                x: Math.round(entity.position.x),
+                y: Math.round(entity.position.y),
+                z: Math.round(entity.position.z),
+              }
+            : undefined;
+          const dist =
+            bot.entity?.position && entity.position
+              ? Number(bot.entity.position.distanceTo(entity.position).toFixed(1))
+              : undefined;
+          this.pushDetection({
+            kind: "crystal_spawn",
+            label: name || "crystal",
+            message: `Crystal placed/spawned${dist != null ? ` (${dist}m)` : ""}`,
+            position: pos,
+            distance: dist,
+          });
+          return;
+        }
+        if (this.config.detectionTnt && isTnt(name)) {
+          const pos = entity.position
+            ? {
+                x: Math.round(entity.position.x),
+                y: Math.round(entity.position.y),
+                z: Math.round(entity.position.z),
+              }
+            : undefined;
+          const dist =
+            bot.entity?.position && entity.position
+              ? Number(bot.entity.position.distanceTo(entity.position).toFixed(1))
+              : undefined;
+          this.pushDetection({
+            kind: "tnt_spawn",
+            label: name || "tnt",
+            message: `TNT primed/fired${dist != null ? ` (${dist}m)` : ""}`,
+            position: pos,
+            distance: dist,
+          });
+        }
+      } catch {
+        /* ignore detection errors */
+      }
+    });
+
+    bot.on("entityGone", (entity) => {
+      if (generation !== this.joinGeneration) return;
+      try {
+        const name = entityLabel(entity);
+        if (this.nearbyPlayers.has(entity.id) || this.isPlayerEntity(entity)) {
+          notePlayerLeave(entity.id, entity.username);
+          return;
+        }
+        if (this.config.detectionCrystals && isCrystal(name)) {
+          const pos = entity.position
+            ? {
+                x: Math.round(entity.position.x),
+                y: Math.round(entity.position.y),
+                z: Math.round(entity.position.z),
+              }
+            : undefined;
+          this.pushDetection({
+            kind: "crystal_gone",
+            label: name || "crystal",
+            message: "Crystal exploded or despawned",
+            position: pos,
+          });
+          return;
+        }
+        if (this.config.detectionTnt && isTnt(name)) {
+          const pos = entity.position
+            ? {
+                x: Math.round(entity.position.x),
+                y: Math.round(entity.position.y),
+                z: Math.round(entity.position.z),
+              }
+            : undefined;
+          this.pushDetection({
+            kind: "tnt_gone",
+            label: name || "tnt",
+            message: "TNT exploded or despawned",
+            position: pos,
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    });
+
+    // Explosion packet (covers crystals/TNT even if entityGone is missed)
+    try {
+      bot._client?.on?.("explosion", (packet: { x?: number; y?: number; z?: number }) => {
+        if (generation !== this.joinGeneration) return;
+        if (!this.config.detectionExplosions) return;
+        const x = packet?.x;
+        const y = packet?.y;
+        const z = packet?.z;
+        if (![x, y, z].every((n) => typeof n === "number" && Number.isFinite(n))) return;
+        const pos = { x: Math.round(x!), y: Math.round(y!), z: Math.round(z!) };
+        const dist =
+          bot.entity?.position != null
+            ? Number(
+                Math.hypot(
+                  bot.entity.position.x - x!,
+                  bot.entity.position.y - y!,
+                  bot.entity.position.z - z!,
+                ).toFixed(1),
+              )
+            : undefined;
+        this.pushDetection({
+          kind: "explosion",
+          label: "explosion",
+          message: `Explosion${dist != null ? ` (${dist}m)` : ""} @ ${pos.x} ${pos.y} ${pos.z}`,
+          position: pos,
+          distance: dist,
+        });
+      });
+    } catch {
+      /* protocol may differ */
+    }
+
+    // —— Combat: who attacked / killed us ——
+    this.lastAttacker = null;
+    this.lastHealthSeen = typeof bot.health === "number" ? bot.health : 20;
+
+    const findLikelyAttacker = (): {
+      username: string;
+      distance: number;
+      position?: { x: number; y: number; z: number };
+    } | null => {
+      const origin = bot.entity?.position;
+      if (!origin) return null;
+      let best: { username: string; distance: number; position?: { x: number; y: number; z: number } } | null =
+        null;
+      const loaded = bot.entities || {};
+      for (const entity of Object.values(loaded)) {
+        if (!entity || entity === bot.entity) continue;
+        if (!this.isPlayerEntity(entity)) continue;
+        if (!entity.position) continue;
+        const dist = origin.distanceTo(entity.position);
+        if (dist > 12) continue;
+        const username = playerName(entity);
+        if (!username) continue;
+        if (!best || dist < best.distance) {
+          best = {
+            username,
+            distance: Number(dist.toFixed(1)),
+            position: {
+              x: Math.round(entity.position.x),
+              y: Math.round(entity.position.y),
+              z: Math.round(entity.position.z),
+            },
+          };
+        }
+      }
+      return best;
+    };
+
+    bot.on("health", () => {
+      if (generation !== this.joinGeneration) return;
+      if (!this.config.detectionCombat) return;
+      try {
+        const hp = typeof bot.health === "number" ? bot.health : this.lastHealthSeen;
+        const prev = this.lastHealthSeen;
+        this.lastHealthSeen = hp;
+        if (!(hp < prev - 0.05)) return;
+
+        const attacker = findLikelyAttacker();
+        if (!attacker) return;
+        this.lastAttacker = { username: attacker.username, at: Date.now() };
+        this.pushDetection({
+          kind: "attacked",
+          label: attacker.username,
+          message: `Attacked by ${attacker.username} · HP ${hp.toFixed(1)} (${attacker.distance}m)`,
+          position: attacker.position,
+          distance: attacker.distance,
+        });
+      } catch {
+        /* ignore */
+      }
+    });
+
+    bot.on("death", () => {
+      if (generation !== this.joinGeneration) return;
+      if (!this.config.detectionCombat) return;
+      try {
+        const recent =
+          this.lastAttacker && Date.now() - this.lastAttacker.at < 10_000
+            ? this.lastAttacker.username
+            : null;
+        const near = findLikelyAttacker();
+        const killer = recent || near?.username || null;
+        if (!killer) return;
+        this.pushDetection({
+          kind: "death",
+          label: killer,
+          message: `Killed by ${killer}`,
+          position: near?.position,
+          distance: near?.distance,
+        });
+      } catch {
+        /* ignore */
+      }
+    });
+
+    const deathChatRe =
+      /\b(?:was (?:slain|shot|killed|blown up|fireballed|pummeled|impaled|frozen to death) by|killed by|slain by)\s+([A-Za-z0-9_]{1,32})\b/i;
+    bot.on("messagestr", (message: string) => {
+      if (generation !== this.joinGeneration) return;
+      if (!this.config.detectionCombat) return;
+      try {
+        const text = String(message || "");
+        const self = bot.username || "";
+        if (!self || !text.toLowerCase().includes(self.toLowerCase())) return;
+        const m = text.match(deathChatRe);
+        if (!m?.[1]) return;
+        const killer = m[1];
+        if (killer.toLowerCase() === self.toLowerCase()) return;
+        this.lastAttacker = { username: killer, at: Date.now() };
+        this.pushDetection({
+          kind: "death",
+          label: killer,
+          message: `Killed by ${killer} (chat)`,
+        });
+      } catch {
+        /* ignore */
+      }
+    });
+
+    // Seed from currently loaded players, then keep in sync on an interval.
+    // Tab-list ↔ entity links often appear a few hundred ms after spawn/portal.
+    const seed = () => {
+      try {
+        this.recheckNearbyPlayers(bot);
+      } catch {
+        /* ignore */
+      }
+    };
+    seed();
+    for (const ms of [400, 1200, 3000]) {
+      setTimeout(() => {
+        if (generation !== this.joinGeneration) return;
+        seed();
+      }, ms);
+    }
+    this.restartDetectionRecheck(bot, generation);
   }
 
   getInventory(): InventoryView {
@@ -433,8 +1037,12 @@ export class FractalBot extends EventEmitter {
     return dumpWorld(bot, this.worldKind);
   }
 
-  getVoxels(radius?: number): VoxelField {
-    return sampleVoxels(this.requireBot(), clampVoxelRadius(radius, 20));
+  getVoxels(radius?: number, quality: VoxelQuality = "full"): VoxelField {
+    const q = quality === "lite" ? "lite" : "full";
+    return sampleVoxels(this.requireBot(), {
+      radius: clampVoxelRadius(radius, q === "lite" ? 12 : 20, q),
+      quality: q,
+    });
   }
 
   startPortalHunt(): void {
@@ -451,8 +1059,13 @@ export class FractalBot extends EventEmitter {
     if (flags.autoReconnect !== undefined) this.autoReconnect = flags.autoReconnect;
     if (flags.autoLobby !== undefined) {
       this.autoLobby = flags.autoLobby;
-      if (this.autoLobby) this.navigator?.start();
-      else this.navigator?.stop();
+      if (this.autoLobby) {
+        // Force restart so a stuck loop actually begins walking again
+        this.navigator?.stop();
+        this.navigator?.start();
+      } else {
+        this.navigator?.stop();
+      }
     }
   }
 
@@ -516,7 +1129,14 @@ export class FractalBot extends EventEmitter {
         if (generation !== this.joinGeneration) return;
         this.refreshWorld("post-auth");
         if (this.autoLobby) this.navigator?.start();
-      }, 2500);
+      }, 800);
+      // Chunks may load a bit later in sky / second lobby
+      setTimeout(() => {
+        if (generation !== this.joinGeneration) return;
+        if (this.autoLobby && this.authenticated && !isMainWorld(this.worldKind)) {
+          this.navigator?.start();
+        }
+      }, 3500);
     });
 
     this.navigator = createPortalNavigator(bot, this.config.portalRetryMs, {
@@ -525,7 +1145,18 @@ export class FractalBot extends EventEmitter {
         this.serverPortalsEntered += 1;
         this.emit("portalEntered", { kind: portal.kind, count: this.serverPortalsEntered });
         log.info(`Entered server portal ${this.serverPortalsEntered}/${this.config.requiredServerPortals}`);
-        setTimeout(() => this.refreshWorld("portal-enter"), 800);
+        // Portal hop unloads entities without reliable entityGone — flush then reseed after transfer
+        this.flushNearbyPlayers("portal");
+        setTimeout(() => {
+          this.refreshWorld("portal-enter");
+          if (this.bot) {
+            try {
+              this.recheckNearbyPlayers(this.bot);
+            } catch {
+              /* ignore */
+            }
+          }
+        }, 800);
       },
       onMiss: (reason) => {
         if (!this.autoLobby) return;
@@ -539,11 +1170,31 @@ export class FractalBot extends EventEmitter {
         !isMainWorld(this.worldKind),
     });
 
-    bot.on("messagestr", (message) => {
-      const text = redactSecrets(String(message)).slice(0, 200);
+    const emitChatLine = (raw: unknown) => {
+      let text = "";
+      try {
+        if (typeof raw === "string") text = raw;
+        else if (raw && typeof (raw as { toString?: () => string }).toString === "function") {
+          text = (raw as { toString: () => string }).toString();
+        } else {
+          text = String(raw ?? "");
+        }
+      } catch {
+        text = String(raw ?? "");
+      }
+      text = redactSecrets(text).replace(/\s+/g, " ").trim().slice(0, 300);
+      if (!text) return;
+      const now = Date.now();
+      // messagestr + message often fire for the same line
+      if (text === this.lastChat && now - (this.lastChatAt ?? 0) < 400) return;
+      this.lastChatAt = now;
       this.lastChat = text;
-      this.emit("chat", { raw: text, timestamp: Date.now() });
-    });
+      this.emit("chat", { raw: text, timestamp: now });
+    };
+    bot.on("messagestr", (message) => emitChatLine(message));
+    bot.on("message", (jsonMsg) => emitChatLine(jsonMsg));
+
+    this.wireDetection(bot, generation);
 
     bot.once("login", () => {
       if (generation !== this.joinGeneration) return;
@@ -723,18 +1374,36 @@ export class FractalBot extends EventEmitter {
   private refreshWorld(reason: string): void {
     const bot = this.bot;
     if (!bot?.entity) return;
+    pruneStalePlayerEntities(bot);
     const kind = classifyWorld(bot, {
       authenticated: this.authenticated,
       serverPortalsEntered: this.serverPortalsEntered,
       requiredServerPortals: this.config.requiredServerPortals,
     });
-    if (kind !== this.worldKind) {
+    const kindChanged = kind !== this.worldKind;
+    if (kindChanged) {
       this.worldKind = kind;
       this.emit("worldKind", kind);
       log.info(`World kind is ${kind} (${reason})`);
     }
+    // Dimension / lobby hops drop entities without entityGone — resync detection set
+    if (kindChanged || reason === "respawn" || reason === "forcedMove" || reason === "portal-enter") {
+      if (this.nearbyPlayers.size) {
+        this.flushNearbyPlayers(reason);
+      }
+      try {
+        this.recheckNearbyPlayers(bot);
+      } catch {
+        /* ignore */
+      }
+    }
 
-    if (isMainWorld(kind) && this.authenticated) {
+    // Do not treat intermediate lobbies as main until required portals are done
+    if (
+      isMainWorld(kind) &&
+      this.authenticated &&
+      this.serverPortalsEntered >= this.config.requiredServerPortals
+    ) {
       this.navigator?.stop();
       this.setPhase("in_game");
       this.captchaHalted = false;
@@ -769,6 +1438,18 @@ export class FractalBot extends EventEmitter {
 
     if (this.authenticated && isLobbyLike(kind)) {
       this.setPhase("lobby");
+      if (this.autoLobby) this.navigator?.start();
+      return;
+    }
+
+    // Still need portals but classifier said "overworld" too early — keep hunting
+    if (
+      this.authenticated &&
+      this.autoLobby &&
+      this.serverPortalsEntered < this.config.requiredServerPortals
+    ) {
+      this.setPhase("lobby");
+      this.navigator?.start();
       return;
     }
 
@@ -877,6 +1558,8 @@ export class FractalBot extends EventEmitter {
 
   private async disconnectInternal(reason: string): Promise<void> {
     this.navigator?.stop();
+    this.clearDetectionRecheck();
+    this.nearbyPlayers.clear();
     this.auth?.destroy();
     this.auth = null;
     this.navigator = null;
@@ -997,25 +1680,66 @@ const ALWAYS_CONSUMABLE = new Set([
 
 const HOTBAR_START = 36;
 
+function itemText(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "string") {
+    const t = value.trim();
+    return t || undefined;
+  }
+  if (typeof value === "object") {
+    const v = value as {
+      toString?: () => string;
+      toMotd?: () => string;
+      getText?: () => string;
+      text?: unknown;
+      value?: unknown;
+    };
+    try {
+      const motd = v.toMotd?.();
+      if (typeof motd === "string" && motd.trim()) return motd.trim();
+    } catch {
+      /* ignore */
+    }
+    try {
+      const text = v.getText?.();
+      if (typeof text === "string" && text.trim()) return text.trim();
+    } catch {
+      /* ignore */
+    }
+    if (typeof v.text === "string" && v.text.trim()) return v.text.trim();
+    if (typeof v.value === "string" && v.value.trim()) return v.value.trim();
+    try {
+      const s = v.toString?.();
+      if (typeof s === "string" && s && s !== "[object Object]") return s.trim();
+    } catch {
+      /* ignore */
+    }
+  }
+  return undefined;
+}
+
 function snapshotItem(item: {
   slot: number;
-  name: string;
-  count: number;
-  displayName: string;
+  name?: unknown;
+  count?: number;
+  displayName?: unknown;
   stackSize?: number;
   durabilityUsed?: number;
   maxDurability?: number;
-  customName?: string | null;
+  customName?: unknown;
 }): InventorySlot {
+  const name = itemText(item.name) || "unknown";
+  const displayName = itemText(item.displayName) || name;
+  const customName = itemText(item.customName);
   return {
     slot: item.slot,
-    name: item.name,
-    count: item.count,
-    displayName: item.displayName,
+    name,
+    count: item.count ?? 1,
+    displayName,
     stackSize: item.stackSize,
     durabilityUsed: item.maxDurability ? item.durabilityUsed : undefined,
     maxDurability: item.maxDurability || undefined,
-    customName: item.customName ?? undefined,
+    customName,
   };
 }
 
@@ -1115,6 +1839,23 @@ function stringifyKick(reason: unknown): string {
     }
   }
   return String(reason);
+}
+
+/** Drop player.entity when the entity is no longer in bot.entities. */
+function pruneStalePlayerEntities(bot: Bot): void {
+  const loaded = bot.entities ?? {};
+  const players = bot.players ? Object.values(bot.players) : [];
+  for (const player of players) {
+    const entity = player.entity;
+    if (!entity) continue;
+    if (entity.id == null || loaded[entity.id] !== entity) {
+      try {
+        (player as { entity?: unknown }).entity = undefined;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 function summarizeDump(dump: WorldDump): string {

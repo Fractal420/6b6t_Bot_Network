@@ -8,31 +8,34 @@ Mineflayer control system for the 6b6t anarchy server. Offline-account join, sto
 
 ```bash
 npm install
-cp .env.example .env
 ```
 
-Put the offline username and in-game password in `.env` (never commit that file). See `.env.example` for the full list:
+All configuration lives under **`Settings/`**:
 
-```
-# Minecraft server
-MC_HOST=alt3.6b6t.org
-MC_PORT=25565
-MC_USERNAME=your_account
-MC_PASSWORD=...
-MC_AUTH=offline
-MC_VERSION=1.21.11
-MC_VIEW_DISTANCE=6
+| Path | Purpose |
+|------|---------|
+| `Settings/settings.json` | Global knobs (host, control API, reconnect, map, Discord, …) |
+| `Settings/Profiles/<id>.json` | **One file per account profile** (credentials + features + overrides) |
+| `Settings/announcements.json` | Default chat announcements |
 
-# Local control API
-CONTROL_HOST=127.0.0.1
-CONTROL_PORT=37637
-CONTROL_TOKEN=
-# CONTROL_EXPOSE=1
+On first run, a legacy `.env` / `accounts.json` is migrated automatically if present. Edit via the dashboard **Settings** panel or the JSON files directly.
 
-# Lobby / reconnect behavior
-SERVER_PORTALS=2
-PORTAL_RETRY_MS=60000
-RECONNECT_MS=8000
+Minimal `Settings/settings.json`:
+
+```json
+{
+  "version": 1,
+  "values": {
+    "MC_HOST": "alt3.6b6t.org",
+    "MC_PORT": "25565",
+    "MC_USERNAME": "your_account",
+    "MC_PASSWORD": "...",
+    "MC_AUTH": "offline",
+    "CONTROL_HOST": "127.0.0.1",
+    "CONTROL_PORT": "37637",
+    "SERVER_PORTALS": "2"
+  }
+}
 ```
 
 Optionally install the CLI on your PATH:
@@ -51,7 +54,7 @@ npm start
 ## CLI
 
 ```bash
-fractalbot join              # offline join + /login from .env, then an interactive shell
+fractalbot join              # offline join + /login from Settings, then an interactive shell
 fractalbot join --daemon     # same, no shell; keep using the CLI against the running bot
 fractalbot status
 fractalbot chat hello
@@ -67,10 +70,10 @@ If a server portal cannot be found after join, the bot stays connected and retri
 
 ## Control API
 
-While the bot is running, a local API listens on `127.0.0.1:37637` only. It always requires `CONTROL_TOKEN` (generated into `.env` on first run). The dashboard sets an HttpOnly cookie; CLI/curl send `Authorization: Bearer …`. `GET /health` stays unauthenticated (loopback-only). `GET /v1/catalog` requires the token.
+While the bot is running, a local API listens on `127.0.0.1:37637` only. It always requires `CONTROL_TOKEN` (written into `Settings/settings.json` on first run). The dashboard sets an HttpOnly cookie; CLI/curl send `Authorization: Bearer …`. `GET /health` stays unauthenticated (loopback-only). `GET /v1/catalog` requires the token.
 
 ```bash
-TOKEN=$(grep '^CONTROL_TOKEN=' .env | cut -d= -f2-)
+TOKEN=$(node -e "console.log(JSON.parse(require('fs').readFileSync('Settings/settings.json','utf8')).values.CONTROL_TOKEN||'')")
 curl -s -H "authorization: Bearer $TOKEN" http://127.0.0.1:37637/v1/view?r=16
 curl -s -X POST http://127.0.0.1:37637/v1/rpc \
   -H "authorization: Bearer $TOKEN" \
@@ -98,7 +101,7 @@ Movement: `control`, `jump`, `stop`, `goto`, `look`, `lookAt`, `turn`.
 Viewport: `view`, `voxels`, `map`, `cursor`, `block`, `dump`, `entities`, `players`.  
 Interact: `attack`, `dig`, `stopDig`, `place`, `activate`, `swing`, `inv`, `chat`, `command`.
 
-Join credentials and Minecraft host cannot be changed over the API — only via `.env` / CLI.
+Join credentials and Minecraft host cannot be changed over the API — only via `Settings/` / CLI.
 
 ```ts
 import { FractalBot } from "fractalbot";
@@ -157,7 +160,7 @@ Embedded **Mineflayer-Elytra-Mapper** flight + Xaero region writer (uses Fractal
 2. Launch platform near the area to map; `/sethome <name>` (default home name `spawn`).
 3. Put that name in `MAP_HOME_NAME`.
 
-**Configure** box / mode in `.env` (`MAP_MODE`, `MAP_BOX_*`, `MAP_OUTPUT_DIR`).
+**Configure** box / mode in `Settings/settings.json` (`MAP_MODE`, `MAP_BOX_*`, `MAP_OUTPUT_DIR`).
 
 **Run:**
 ```bash
@@ -174,15 +177,17 @@ Regions land in `MAP_OUTPUT_DIR/regions/overworld/*.zip` (Xaero World Map compat
 
 ## Discord remote control
 
-Optional. Install the dependency and set env:
+Optional. Install the dependency and set values in `Settings/settings.json`:
 
 ```bash
 npm install discord.js
-# .env
-DISCORD_ENABLED=1
-DISCORD_TOKEN=your_bot_token
-DISCORD_CHANNEL_ID=123456789012345678
-DISCORD_MIRROR_LOGS=1
+```
+
+```json
+"DISCORD_ENABLED": "1",
+"DISCORD_TOKEN": "your_bot_token",
+"DISCORD_CHANNEL_ID": "123456789012345678",
+"DISCORD_MIRROR_LOGS": "1"
 ```
 
 Enable **Message Content Intent** for the bot in the Discord Developer Portal. Invite it to a private channel.
@@ -208,6 +213,6 @@ Captcha kicks are posted to the channel when mirror logs are on.
 
 ## Multi-account fleet
 
-Accounts live in `accounts.json` (next to `.env`). Web **Fleet** panel: add accounts, assign tasks (`join` / `hunt` / `map` / `idle` / `leave`), start/stop each bot. Env `MC_USERNAME` seeds the first account on first run.
+Each account is one file under `Settings/Profiles/<LabelOrUsername>.json` (display label if set, otherwise the Minecraft username). Web **Fleet** panel: add accounts, assign tasks (`join` / `hunt` / `map` / `idle` / `leave`), start/stop each bot. Global `MC_USERNAME` in `Settings/settings.json` seeds the first profile on first run.
 
 RPC: `fleetStatus`, `fleetAddAccount`, `fleetStart`, `fleetSetTask`, `fleetStartAll`, …

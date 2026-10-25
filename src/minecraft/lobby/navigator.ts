@@ -1,6 +1,5 @@
 import type { Bot } from "mineflayer";
 import { Vec3 } from "vec3";
-import { goals, Movements } from "../pathfinder.ts";
 import type { PortalTarget, WorldKind } from "../../api/types.ts";
 import { log } from "../../logger.ts";
 import { pickServerPortal, findPortalBlocks } from "./portals.ts";
@@ -24,6 +23,8 @@ export interface PortalNavigator {
 const KNOWN_SERVER_PORTALS = [
   { x: -1000, y: 102, z: -988 },
   { x: 311, y: 163.5, z: 427 },
+  { x: 245, y: 67, z: 220 },
+  { x: 250, y: 65, z: 225 },
 ];
 
 function sleep(ms: number): Promise<void> {
@@ -33,102 +34,96 @@ function sleep(ms: number): Promise<void> {
 function inPortalBlock(bot: Bot): boolean {
   const pos = bot.entity?.position;
   if (!pos) return false;
-  const names = [
-    bot.blockAt(pos.floored())?.name,
-    bot.blockAt(pos.offset(0, 1, 0).floored())?.name,
-    bot.blockAt(pos.offset(0, 0.5, 0).floored())?.name,
+  const yaw = bot.entity.yaw;
+  const fx = -Math.sin(yaw);
+  const fz = -Math.cos(yaw);
+  const samples = [
+    pos.floored(),
+    pos.offset(0, 1, 0).floored(),
+    pos.offset(0, 0.5, 0).floored(),
+    pos.offset(fx, 0, fz).floored(),
+    pos.offset(fx, 1, fz).floored(),
   ];
-  return names.some((name) => name === "nether_portal" || name === "end_gateway" || name === "end_portal");
+  return samples.some((p) => {
+    const name = bot.blockAt(p)?.name;
+    return name === "nether_portal" || name === "end_gateway" || name === "end_portal";
+  });
 }
 
 export function createPortalNavigator(bot: Bot, retryMs: number, hooks: NavigatorHooks): PortalNavigator {
   let hunting = false;
   let stopped = false;
-  let lastPos = bot.entity?.position?.clone();
+  let loopGen = 0;
 
   const stopMovement = () => {
     try {
       bot.clearControlStates();
-    } catch {}
+    } catch {
+      /* ignore */
+    }
     try {
       bot.pathfinder?.setGoal(null);
     } catch {
-      // pathfinder may not be loaded yet
+      /* ignore */
     }
   };
 
-  const waitForTransfer = async (portal: PortalTarget, start: Vec3): Promise<boolean> => {
-    stopMovement();
-    const startDim = String(bot.game?.dimension ?? "");
-    const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline && !stopped) {
-      if (!bot.entity) return false;
-      const here = bot.entity.position;
-      const dim = String(bot.game?.dimension ?? "");
-      const gm = String(bot.game?.gameMode ?? "").toLowerCase();
-      if (gm === "survival" || gm === "0" || dim !== startDim) {
-        hooks.onEntered(portal);
-        return true;
-      }
-      await sleep(200);
-    }
+  const hasTransferred = (startPos: Vec3, startDim: string): boolean => {
+    if (!bot.entity) return false;
+    const here = bot.entity.position;
+    const dim = String(bot.game?.dimension ?? "");
+    const gm = String(bot.game?.gameMode ?? "").toLowerCase();
+    if (gm === "survival" || gm === "0") return true;
+    if (dim !== startDim) return true;
+    if (here.distanceTo(startPos) > 20) return true;
     return false;
   };
 
   const huntOnce = async (): Promise<boolean> => {
     if (!bot.entity) return false;
     const worldKind = hooks.getWorldKind();
-    if (!hooks.allowServerPortals() || worldKind === "backup" || (!isLobbyLike(worldKind) && worldKind !== "unknown")) {
-      return false;
-    }
+    if (!hooks.allowServerPortals()) return false;
+    if (worldKind === "backup") return false;
 
     const pos = bot.entity.position;
     const dim = String(bot.game?.dimension ?? "").toLowerCase();
-    const gm = String(bot.game?.gameMode ?? "").toLowerCase();
-
-    if (dim.includes("overworld") && (gm === "adventure" || gm === "1") && pos.y < 40) {
-      log.info("Post-portal staging; waiting for main-world transfer");
-      stopMovement();
-      const until = Date.now() + 12_000;
-      while (Date.now() < until && !stopped) {
-        if (!bot.entity) return false;
-        const nowGm = String(bot.game?.gameMode ?? "").toLowerCase();
-        if (nowGm === "survival" || nowGm === "0") {
-          const here = bot.entity.position;
-          hooks.onEntered({
-            kind: "server",
-            position: { x: here.x, y: here.y, z: here.z },
-            distance: 0,
-            blockName: "staging-transfer",
-          });
-          return true;
-        }
-        await sleep(200);
-      }
-    }
 
     if (dim.includes("overworld") && pos.y > 90) {
       try {
         const client = bot._client as { write: (name: string, params: unknown) => void; state?: string };
-        if (!client.state || client.state === "play") {
-          client.write("player_loaded", {});
-          log.info("Sky lobby: resent player_loaded before the second portal");
-        }
+        if (!client.state || client.state === "play") client.write("player_loaded", {});
       } catch {
-        // client may already be closing
+        /* ignore */
       }
-      await sleep(400);
     }
 
-    const raw = findPortalBlocks(bot, 64, 2048);
+    // Fast portal find — no pathfinder, pure sprint
+    const raw = findPortalBlocks(bot, 72, 1024);
     let portal = pickServerPortal(raw, worldKind, true);
-    if (!portal && raw.length > 0) {
-      log.info("Nearby portal blocks are not a normal 2×3 vanilla portal; skipping decorative portal wall");
+    if (!portal) {
+      // Last resort: cluster remaining nether_portal blocks and aim at their
+      // middle (never a single edge block — that is how bots get stuck on
+      // the side of the large second lobby portal).
+      const nether = raw.filter((p) => p.blockName === "nether_portal");
+      if (nether.length > 0) {
+        const cx = nether.reduce((s, p) => s + p.position.x + 0.5, 0) / nether.length;
+        const cy = nether.reduce((s, p) => s + p.position.y + 0.5, 0) / nether.length;
+        const cz = nether.reduce((s, p) => s + p.position.z + 0.5, 0) / nether.length;
+        const nearest = nether.sort((a, b) => a.distance - b.distance)[0];
+        portal = {
+          ...nearest,
+          kind: "server",
+          position: { x: cx, y: cy, z: cz },
+          distance: nearest.distance,
+        };
+      }
     }
     if (!portal) {
-      const known = KNOWN_SERVER_PORTALS
-        .map((spot) => ({ spot, distance: pos.distanceTo(new Vec3(spot.x, spot.y, spot.z)) }))
-        .filter((entry) => entry.distance < 80)
+      const known = KNOWN_SERVER_PORTALS.map((spot) => ({
+        spot,
+        distance: pos.distanceTo(new Vec3(spot.x, spot.y, spot.z)),
+      }))
+        .filter((e) => e.distance < 180)
         .sort((a, b) => a.distance - b.distance)[0];
       if (known) {
         portal = {
@@ -140,96 +135,141 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
       }
     }
     if (!portal) {
-      hooks.onMiss(raw.length > 0 ? "no vanilla-sized server portal in range" : "no server portal in range");
+      hooks.onMiss(raw.length ? "no usable portal" : "no portal in range");
       return false;
     }
 
     hooks.onFound(portal);
     log.info(
-      `Walking into ${portal.kind} portal at ${portal.position.x.toFixed(1)},${portal.position.y.toFixed(1)},${portal.position.z.toFixed(1)} (${portal.blockName}, ${portal.distance.toFixed(1)}m)`,
+      `Sprint → portal ${portal.position.x.toFixed(0)},${portal.position.y.toFixed(0)},${portal.position.z.toFixed(0)} (${portal.distance.toFixed(1)}m)`,
     );
 
-    const start = bot.entity.position.clone();
-    lastPos = start;
-    const toward = new Vec3(portal.position.x, portal.position.y, portal.position.z);
-    const target = new Vec3(toward.x, start.y, toward.z);
-
+    // Cancel any leftover pathfinder so it cannot slow or stop us
     try {
-      const movements = new Movements(bot);
-      movements.canDig = false;
-      movements.allow1by1towers = false;
-      bot.pathfinder.setMovements(movements);
-      bot.pathfinder.setGoal(new goals.GoalNear(target.x, start.y, target.z, 0.6));
-    } catch (error) {
-      log.warn("Pathfinder unavailable, walking forward instead", error instanceof Error ? error.message : error);
+      bot.pathfinder?.setGoal(null);
+    } catch {
+      /* ignore */
     }
 
-    const deadline = Date.now() + 20_000;
+    const startPos = bot.entity.position.clone();
+    const startDim = String(bot.game?.dimension ?? "");
+    // pickServerPortal already returns the geometric center of the portal cluster
+    // (block centers averaged). Integer coords come from single-block / known-spot
+    // fallbacks — snap those to block center. Never add 0.5 twice or the bot
+    // aims at the side of large second portals and gets stuck on the frame.
+    const px = portal.position.x;
+    const py = portal.position.y;
+    const pz = portal.position.z;
+    const target = new Vec3(
+      Number.isInteger(px) ? px + 0.5 : px,
+      Number.isInteger(py) ? py + 0.5 : py,
+      Number.isInteger(pz) ? pz + 0.5 : pz,
+    );
+    const flat = new Vec3(target.x - startPos.x, 0, target.z - startPos.z);
+    const fl = Math.hypot(flat.x, flat.z) || 1;
+    // Aim well past the middle so we walk straight through the opening
+    const past = new Vec3(target.x + (flat.x / fl) * 6, target.y, target.z + (flat.z / fl) * 6);
+
+    const deadline = Date.now() + 14_000;
+    let lastMoveCheck = Date.now();
+    let lastMovePos = startPos.clone();
+    let stuckBoosts = 0;
+
     while (Date.now() < deadline && !stopped) {
       if (!bot.entity) break;
       const here = bot.entity.position;
-      if (lastPos && here.distanceTo(lastPos) > 18) {
+
+      if (hasTransferred(startPos, startDim)) {
         stopMovement();
         hooks.onEntered(portal);
         return true;
       }
-      if (inPortalBlock(bot)) {
-        log.info("Inside server portal; standing with physics on until transfer");
-        stopMovement();
-        return waitForTransfer(portal, start);
+
+      // Always face the middle of the portal and a point past it so we walk
+      // straight through the opening instead of grazing the side.
+      void bot.lookAt(new Vec3(past.x, here.y + 1.0, past.z), true).catch(() => {});
+
+      bot.setControlState("forward", true);
+      bot.setControlState("sprint", true);
+
+      const dist = Math.hypot(here.x - target.x, here.z - target.z);
+      const inside = inPortalBlock(bot);
+
+      // Close or inside: jump-burst through frame (obsidian lip)
+      if (dist < 5 || inside) {
+        bot.setControlState("jump", true);
+        await sleep(50);
+        bot.setControlState("jump", false);
       }
 
-      try {
-        await bot.lookAt(new Vec3(target.x, here.y + 1.2, target.z), true);
-      } catch {
-        // look can fail mid-teleport
+      // Stuck detector: not moving for 700ms while holding forward
+      if (Date.now() - lastMoveCheck > 700) {
+        if (here.distanceTo(lastMovePos) < 0.35) {
+          stuckBoosts += 1;
+          log.info(`Portal approach stuck (boost ${stuckBoosts}) — re-center + jump/strafe`);
+          // Re-aim hard at the portal middle, not the side we drifted into
+          void bot.lookAt(new Vec3(past.x, here.y + 1.0, past.z), true).catch(() => {});
+          bot.setControlState("jump", true);
+          bot.setControlState(stuckBoosts % 2 === 0 ? "left" : "right", true);
+          await sleep(140);
+          bot.setControlState("left", false);
+          bot.setControlState("right", false);
+          bot.setControlState("jump", false);
+        }
+        lastMoveCheck = Date.now();
+        lastMovePos = here.clone();
       }
-      bot.setControlState("forward", true);
-      bot.setControlState("sprint", here.distanceTo(target) > 3);
-      lastPos = here.clone();
-      await sleep(150);
+
+      await sleep(50);
     }
 
     stopMovement();
-    hooks.onMiss("timed out walking into portal");
+    if (bot.entity && hasTransferred(startPos, startDim)) {
+      hooks.onEntered(portal);
+      return true;
+    }
+    hooks.onMiss("timed out at portal");
     return false;
   };
 
-  const runLoop = async () => {
-    while (hunting && !stopped) {
-      const worldKind = hooks.getWorldKind();
+  const runLoop = async (gen: number) => {
+    while (hunting && !stopped && gen === loopGen) {
       if (!hooks.allowServerPortals()) {
         hunting = false;
         break;
       }
-      if (worldKind === "backup" || (!isLobbyLike(worldKind) && worldKind !== "unknown")) {
-        hunting = false;
-        break;
-      }
       const ok = await huntOnce();
+      if (gen !== loopGen) break;
       if (ok) {
-        await sleep(3500);
+        // Immediately look for next portal (second portal) — minimal pause
+        await sleep(400);
         continue;
       }
-      log.info(`Portal not found or not entered. Retrying in ${Math.round(retryMs / 1000)}s`);
-      const waitUntil = Date.now() + retryMs;
-      while (hunting && !stopped && Date.now() < waitUntil) {
-        await sleep(500);
+      const waitMs = Math.min(Math.max(retryMs, 1500), 3000);
+      log.info(`Portal retry in ${Math.round(waitMs / 1000)}s`);
+      const until = Date.now() + waitMs;
+      while (hunting && !stopped && gen === loopGen && Date.now() < until) {
+        await sleep(150);
       }
     }
-    stopMovement();
+    if (gen === loopGen) stopMovement();
   };
 
   return {
     start() {
-      if (hunting) return;
+      stopped = true;
+      hunting = false;
+      stopMovement();
+      loopGen += 1;
+      const gen = loopGen;
       stopped = false;
       hunting = true;
-      void runLoop();
+      void runLoop(gen);
     },
     stop() {
       hunting = false;
       stopped = true;
+      loopGen += 1;
       stopMovement();
     },
     huntOnce,

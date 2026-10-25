@@ -132,10 +132,13 @@ export function pickServerPortal(
   const servers = classified.filter((portal) => portal.kind === "server" && portal.blockName === "nether_portal");
   if (servers.length === 0) return null;
 
-  const vanilla = clusterTouching(servers).filter(isNormalVanillaPortal);
-  if (vanilla.length === 0) return null;
-  vanilla.sort((a, b) => minDistance(a) - minDistance(b));
-  const clusterPortals = vanilla[0];
+  const clusters = clusterTouching(servers);
+  // Prefer strict vanilla 2×3 interiors; fall back to any nether_portal cluster (6b6t layouts vary)
+  let chosen = clusters.filter(isNormalVanillaPortal);
+  if (chosen.length === 0) chosen = clusters.filter((c) => c.length >= 2);
+  if (chosen.length === 0) chosen = clusters;
+  chosen.sort((a, b) => minDistance(a) - minDistance(b));
+  const clusterPortals = chosen[0];
   if (!clusterPortals?.length) return null;
 
   const cx = average(clusterPortals.map((p) => p.position.x + 0.5));

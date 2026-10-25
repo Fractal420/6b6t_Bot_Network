@@ -262,6 +262,29 @@ export interface FractalBotEvents {
   portalEntered: (info: { kind: PortalKind; count: number }) => void;
   lobbyRetry: (info: { inMs: number; reason: string }) => void;
   worldKind: (kind: WorldKind) => void;
+  detection: (event: DetectionEvent) => void;
+}
+
+export type DetectionKind =
+  | "player_enter"
+  | "player_leave"
+  | "crystal_spawn"
+  | "crystal_gone"
+  | "tnt_spawn"
+  | "tnt_gone"
+  | "explosion"
+  | "attacked"
+  | "hurt"
+  | "death";
+
+export interface DetectionEvent {
+  id: string;
+  at: string;
+  kind: DetectionKind;
+  label: string;
+  message: string;
+  position?: { x: number; y: number; z: number };
+  distance?: number;
 }
 
 export type ControlRequest =
@@ -286,6 +309,8 @@ export type ControlRequest =
   | { action: "respawn" }
   | { action: "status" }
   | { action: "players" }
+  | { action: "detection" }
+  | { action: "clearDetection" }
   | { action: "entities" }
   | { action: "inventory" }
   | ({ action: "inv" } & InvCommand)

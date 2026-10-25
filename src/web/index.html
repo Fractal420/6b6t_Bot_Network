@@ -2,9 +2,9 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="referrer" content="no-referrer" />
-    <meta name="theme-color" content="#e0b043" />
+    <meta name="theme-color" content="#3b82f6" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -14,232 +14,679 @@
   </head>
   <body>
     <div class="grain" aria-hidden="true"></div>
+
     <header class="top">
-      <div class="brand">
-        <span class="mark">◆</span>
-        <div>
-          <p class="kicker">6b6t live ops</p>
-          <h1>Fractal console</h1>
+      <div class="brand-row">
+        <button type="button" id="nav-toggle" class="icon-btn" aria-label="Open modules" title="Modules">
+          <span aria-hidden="true">☰</span>
+        </button>
+        <div class="brand">
+          <span class="mark">◆</span>
+          <div>
+            <p class="kicker">6b6t live ops</p>
+            <h1>Fractal console</h1>
+          </div>
         </div>
       </div>
-      <div class="ident">
-        <p id="ident-name">—</p>
-        <p id="ident-host">not connected</p>
+
+      <div class="profile-switcher" id="profile-switcher">
+        <button
+          type="button"
+          id="profile-selector-btn"
+          class="profile-selector-btn"
+          aria-haspopup="listbox"
+          aria-expanded="false"
+          aria-controls="profile-dropdown"
+        >
+          <span class="ps-status" id="ps-status-dot" data-tone="neutral"></span>
+          <span class="ps-info">
+            <span class="ps-label" id="ps-label">No profile</span>
+            <span class="ps-meta" id="ps-meta">Select a profile</span>
+          </span>
+          <span class="ps-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div id="profile-dropdown" class="profile-dropdown" role="listbox" hidden>
+          <div class="pd-head">
+            <span>Profiles</span>
+            <button type="button" class="pd-manage" id="pd-manage" title="Manage profiles">Manage</button>
+          </div>
+          <div id="pd-list" class="pd-list"></div>
+          <div class="pd-empty" id="pd-empty" hidden>No profiles yet — open Manage to add one</div>
+        </div>
       </div>
-      <div class="phase-wrap">
-        <span class="phase pill" id="phase" data-tone="neutral">idle</span>
-        <span class="link" id="ws-state">socket cold</span>
+
+      <div class="top-right">
+        <button type="button" id="nav-log" class="icon-btn" data-tab="log" aria-label="Activity log" title="Log">
+          <span aria-hidden="true">🪵</span>
+        </button>
+        <button type="button" id="nav-settings" class="icon-btn" data-tab="settings" aria-label="Settings" title="Settings">
+          <span aria-hidden="true">⚙</span>
+        </button>
+        <div class="phase-wrap">
+          <span class="phase pill" id="phase" data-tone="neutral">idle</span>
+          <span class="link" id="ws-state">socket cold</span>
+        </div>
       </div>
     </header>
 
-    <nav class="jump-bar" aria-label="Sections">
-      <a href="#fleet-panel">Fleet</a>
-      <a href="#vitals-panel">Vitals</a>
-      <a href="#mapping-panel">Mapping</a>
-      <a href="#wire-panel">Wire</a>
-      <a href="#settings-panel">Settings</a>
-      <a href="#survey">Survey</a>
-      <a href="#activity-panel">Activity</a>
-    </nav>
-
-    <section id="alerts-bar" class="alerts-bar" hidden></section>
-
-    <section id="ops-strip" class="ops-strip" aria-live="polite">
-      <span id="ops-summary">fleet cold · no status yet</span>
-    </section>
-
-    <main class="board">
-      <section class="panel fleet" id="fleet-panel">
-        <div class="fleet-head">
-          <h2>Fleet</h2>
-          <div class="fleet-tools">
-            <button type="button" id="fleet-start-all">start all</button>
-            <button type="button" id="fleet-stop-all" class="danger">stop all</button>
-            <button type="button" id="fleet-refresh">refresh</button>
-          </div>
+    <div class="app-shell">
+      <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
+      <aside id="sidebar" class="sidebar" aria-label="Modules">
+        <div class="sidebar-head">
+          <span class="sidebar-title">Modules</span>
+          <button type="button" id="sidebar-close" class="icon-btn ghost" aria-label="Close menu">×</button>
         </div>
-        <p class="hint" id="fleet-path">accounts.json</p>
-        <div id="fleet-grid" class="fleet-grid"></div>
-        <form id="fleet-add" class="fleet-add">
-          <input name="label" placeholder="label (optional)" />
-          <input name="username" placeholder="username" required />
-          <input name="password" type="password" placeholder="password" />
-          <label class="feat"><input type="checkbox" name="online" checked /> online</label>
-          <label class="feat"><input type="checkbox" name="announcements" /> announce</label>
-          <label class="feat"><input type="checkbox" name="antiAfk" /> anti-AFK</label>
-          <label class="feat"><input type="checkbox" name="hunt" /> hunt</label>
-          <label class="feat"><input type="checkbox" name="map" /> map</label>
-          <button type="submit">add account</button>
-        </form>
-        <details class="announce-edit">
-          <summary>Default announcements (global)</summary>
-          <textarea id="announce-json" rows="4" placeholder='[{"message":"Hello","intervalMs":300000}]'></textarea>
-          <button type="button" id="announce-save">save announcements</button>
-        </details>
-      </section>
-
-      <section class="panel vitals" id="vitals-panel">
-        <h2>Vitals <span class="hint" id="active-bot-label">(selected bot)</span></h2>
-        <dl class="meta">
-          <div><dt>world</dt><dd id="world">—</dd></div>
-          <div><dt>dimension</dt><dd id="dimension">—</dd></div>
-          <div><dt>xyz</dt><dd id="xyz">—</dd></div>
-          <div><dt>ping</dt><dd id="ping">—</dd></div>
-          <div><dt>tab</dt><dd id="tab">—</dd></div>
-          <div><dt>uptime</dt><dd id="uptime">—</dd></div>
-        </dl>
-        <div class="bars">
-          <label>health <span id="hp-n">—</span></label>
-          <div class="bar hp" id="hp"><i></i></div>
-          <label>food <span id="food-n">—</span></label>
-          <div class="bar food" id="food"><i></i></div>
-        </div>
-        <p class="flags">
-          <button type="button" class="chip" id="toggle-reconnect" data-flag="autoReconnect">reconnect</button>
-          <button type="button" class="chip" id="toggle-lobby" data-flag="autoLobby">auto lobby</button>
-          <button type="button" class="chip" id="toggle-notify" title="Browser / mobile notifications for captcha">notify off</button>
-          <span class="chip ghost" id="hunt-state">hunt off</span>
-        </p>
-        <div class="actions">
-          <button type="button" data-rpc="join">join</button>
-          <button type="button" data-rpc="reconnect">rejoin</button>
-          <button type="button" data-rpc="leave" class="danger">leave</button>
-          <button type="button" data-rpc="hunt">hunt portals</button>
-          <button type="button" data-rpc="stop">stop</button>
-          <button type="button" data-rpc="mapStart">map start</button>
-          <button type="button" data-rpc="mapStop">map stop</button>
-        </div>
-        <p class="fault" id="fault" hidden></p>
-        <div class="captcha-banner" id="captcha-banner" hidden>
-          <div class="captcha-head">
-            <strong>Anti-bot / captcha</strong>
-            <button type="button" class="captcha-dismiss" id="captcha-dismiss" title="Dismiss">×</button>
-          </div>
-          <p class="captcha-reason" id="captcha-reason"></p>
-          <p class="captcha-code" id="captcha-code" hidden></p>
-          <div class="captcha-links" id="captcha-links"></div>
-          <p class="captcha-hint">
-            Open a link below (enter the code if shown), or log in with a normal Minecraft client, then press
-            <em>rejoin</em>.
-          </p>
-        </div>
-      </section>
-
-      <section class="panel jobs" id="mapping-panel">
-        <h2>Elytra mapping</h2>
-        <div class="job-card" id="mapping-card">
-          <p class="job-line"><span class="pill" id="map-active-pill" data-tone="neutral">idle</span>
-            <span id="map-mode-label">mode —</span></p>
-          <p class="job-line" id="map-progress">covered — / —</p>
-          <p class="job-line mute" id="map-output">output —</p>
-          <p class="job-line warn" id="map-stall" hidden>⚠ mapping stall — no progress recently</p>
-          <div class="job-actions">
-            <button type="button" data-rpc="mapStart">map start</button>
-            <button type="button" data-rpc="mapStop">map stop</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel chat" id="wire-panel">
-        <h2>Wire</h2>
-        <ol id="log" class="log"></ol>
-        <form id="say" class="say">
+        <div class="sidebar-search-wrap">
           <input
-            id="say-input"
+            id="sidebar-search"
+            class="sidebar-search"
+            type="search"
             autocomplete="off"
             spellcheck="false"
-            placeholder="say in chat, or /command"
+            placeholder="Search modules…"
+            aria-label="Search modules"
           />
-          <button type="submit">send</button>
-        </form>
-      </section>
-
-      <section class="panel roster">
-        <h2>Nearby <span id="player-count"></span></h2>
-        <ul id="players" class="list"></ul>
-      </section>
-
-      <section class="panel pack">
-        <div class="pack-head">
-          <h2>Pack</h2>
-          <p class="hint" id="pack-held">hands empty</p>
         </div>
-        <div class="inv" id="inv">
-          <div class="inv-gear" id="inv-gear"></div>
-          <div class="inv-main" id="inv-main"></div>
-          <div class="inv-hot" id="inv-hot"></div>
-        </div>
-        <p class="inv-name" id="inv-name">click a slot · click another to swap</p>
-        <div class="inv-acts">
-          <button type="button" data-inv="hold">hold</button>
-          <button type="button" data-inv="drop">drop</button>
-          <button type="button" data-inv="dropStack">toss</button>
-          <button type="button" data-inv="equip">equip</button>
-          <button type="button" data-inv="offhand">offhand</button>
-          <button type="button" data-inv="use">use</button>
-        </div>
-      </section>
+        <nav class="side-nav" id="side-nav" role="navigation"></nav>
+        <p class="sidebar-foot hint">Settings &amp; Log are in the top bar</p>
+      </aside>
 
-      <section class="panel move">
-        <h2>Steer</h2>
-        <p class="hint">WASD move · space jump · shift sneak · R sprint</p>
-        <div class="pad" aria-hidden="true">
-          <b data-k="forward">W</b>
-          <div class="row">
-            <b data-k="left">A</b>
-            <b data-k="back">S</b>
-            <b data-k="right">D</b>
+      <div class="shell-main">
+        <section id="alerts-bar" class="alerts-bar" hidden></section>
+
+        <section id="ops-strip" class="ops-strip" aria-live="polite">
+          <div class="ops-left">
+            <span id="ops-summary">no status yet</span>
+          </div>
+          <div class="ops-vitals" id="ops-vitals" hidden>
+            <span class="ov-item"><span class="ov-k">world</span> <span id="ops-world">—</span></span>
+            <span class="ov-item"><span class="ov-k">pos</span> <span id="ops-xyz">—</span></span>
+            <span class="ov-item"><span class="ov-k">hp</span> <span id="ops-hp">—</span></span>
+            <span class="ov-item"><span class="ov-k">food</span> <span id="ops-food">—</span></span>
+            <span class="ov-item"><span class="ov-k">ping</span> <span id="ops-ping">—</span></span>
+          </div>
+        </section>
+
+        <main class="board">
+      <!-- ========== MANAGE (profiles — not a main tab) ========== -->
+      <section class="panel fleet tab-panel" id="fleet-panel" data-tab="fleet" role="tabpanel" hidden>
+        <div class="section-head">
+          <div class="fleet-title-row">
+            <button type="button" id="fleet-back" class="fleet-back" title="Back">←</button>
+            <div>
+              <h2>Manage profiles</h2>
+              <p class="hint" id="fleet-path">accounts.json</p>
+            </div>
+          </div>
+          <div class="fleet-tools">
+            <button type="button" id="fleet-start-all">Start all</button>
+            <button type="button" id="fleet-stop-all" class="danger">Stop all</button>
+            <button type="button" id="fleet-refresh">Refresh</button>
           </div>
         </div>
-        <form id="goto" class="goto">
-          <input name="x" placeholder="x" inputmode="decimal" />
-          <input name="y" placeholder="y" inputmode="decimal" />
-          <input name="z" placeholder="z" inputmode="decimal" />
-          <button type="submit">goto</button>
-        </form>
+
+        <div id="fleet-grid" class="profile-list"></div>
+
+        <details class="add-profile" id="add-profile-box">
+          <summary>Add profile</summary>
+          <form id="fleet-add" class="fleet-add">
+            <input name="label" placeholder="Label (optional)" />
+            <input name="username" placeholder="Username" required />
+            <input name="password" type="password" placeholder="Password" />
+            <button type="submit" class="primary">Create</button>
+          </form>
+        </details>
+
+        <section class="profile-editor" id="profile-editor" hidden>
+          <div class="section-head">
+            <h3 id="profile-title">Selected profile</h3>
+            <div class="profile-actions-inline">
+              <button type="button" id="profile-start">Start</button>
+              <button type="button" id="profile-stop">Stop</button>
+            </div>
+          </div>
+          <form id="profile-form" class="profile-form">
+            <input type="hidden" name="id" />
+            <label>Label<input name="label" placeholder="Display name" autocomplete="off" /></label>
+            <label>Username<input name="username" required autocomplete="username" /></label>
+            <label>Password<input name="password" type="password" placeholder="Leave blank to keep" autocomplete="new-password" /></label>
+            <label>Auth
+              <select name="auth">
+                <option value="offline">Offline</option>
+                <option value="microsoft">Microsoft</option>
+              </select>
+            </label>
+            <label>Host override<input name="host" placeholder="Global default" /></label>
+            <label>Port override<input name="port" type="number" placeholder="25565" /></label>
+            <label class="span-2">Notes<textarea name="notes" rows="2" placeholder="Optional notes"></textarea></label>
+            <div class="profile-actions span-2">
+              <button type="submit" class="primary">Save profile</button>
+              <button type="button" class="danger" id="profile-remove">Remove</button>
+            </div>
+          </form>
+          <p class="hint"><strong>Start</strong> only activates the profile. Turn <strong>Online</strong> on (Play) to log in. Map / Announce are separate tabs.</p>
+        </section>
       </section>
 
-      <section class="panel settings" id="settings-panel">
-        <div class="settings-head">
-          <h2>Settings (.env)</h2>
-          <p class="hint" id="settings-path">load to edit all env values</p>
-        </div>
-        <form id="settings-form" class="settings-form"></form>
-        <p class="settings-msg" id="settings-msg" hidden></p>
-        <div class="settings-actions">
-          <button type="button" id="settings-reload">reload</button>
-          <button type="button" id="settings-save" class="primary">save to .env</button>
-        </div>
-      </section>
-
-      <section class="panel survey" id="survey">
-        <div class="survey-head">
+      <!-- ========== PLAY ========== -->
+      <section class="panel play-panel tab-panel on" id="play-panel" data-tab="play" role="tabpanel">
+        <div class="section-head">
           <div>
-            <h2>Survey flight</h2>
-            <p class="hint" id="survey-hint">follow: WASD steers the bot · orbit/fly: click the stage, WASD is camera · esc</p>
+            <h2>Play</h2>
+            <p class="hint" id="active-bot-label">no profile selected</p>
           </div>
-          <p class="survey-meta" id="survey-meta">no terrain yet</p>
-          <div class="survey-tools">
-            <button type="button" class="rad" data-r="14">14m</button>
-            <button type="button" class="rad on" data-r="20">20m</button>
-            <button type="button" class="rad" data-r="28">28m</button>
-            <button type="button" id="survey-follow">follow</button>
-            <button type="button" id="survey-orbit" class="on">orbit</button>
+          <button type="button" class="tab-settings-btn" data-open-settings="play" title="Play settings">⚙ Settings</button>
+        </div>
+
+        <div class="card-block">
+          <h3 class="subhead">Connection</h3>
+          <div class="switch-grid">
+            <label class="task-toggle" data-feat="online">
+              <span class="tt-text"><strong>Online</strong><small>Connect &amp; auto-reconnect · off disconnects</small></span>
+              <input type="checkbox" name="online" role="switch" />
+              <span class="tt-switch" aria-hidden="true"></span>
+            </label>
+            <label class="task-toggle" id="toggle-lobby-wrap">
+              <span class="tt-text"><strong>Auto-lobby</strong><small>Walk portals into main after login</small></span>
+              <input type="checkbox" id="toggle-lobby" role="switch" />
+              <span class="tt-switch" aria-hidden="true"></span>
+            </label>
+            <label class="task-toggle" data-feat="antiAfk">
+              <span class="tt-text"><strong>Anti-AFK</strong><small>Light movement while idle</small></span>
+              <input type="checkbox" name="antiAfk" role="switch" />
+              <span class="tt-switch" aria-hidden="true"></span>
+            </label>
+            <label class="task-toggle" id="toggle-notify-wrap">
+              <span class="tt-text"><strong>Captcha notify</strong><small>Browser alerts for captcha kicks</small></span>
+              <input type="checkbox" id="toggle-notify" role="switch" />
+              <span class="tt-switch" aria-hidden="true"></span>
+            </label>
           </div>
         </div>
-        <div class="survey-stage">
-          <canvas id="world3d" tabindex="0" aria-label="3D survey of blocks around the bot"></canvas>
-          <div class="crosshair" aria-hidden="true"></div>
-          <p class="survey-hud" id="survey-hud">aim into the void</p>
-          <p class="survey-compass" id="survey-compass">N</p>
+
+        <div class="card-block">
+          <h3 class="subhead">Status</h3>
+          <dl class="meta">
+            <div><dt>world</dt><dd id="world">—</dd></div>
+            <div><dt>dimension</dt><dd id="dimension">—</dd></div>
+            <div><dt>xyz</dt><dd id="xyz">—</dd></div>
+            <div><dt>ping</dt><dd id="ping">—</dd></div>
+            <div><dt>tab</dt><dd id="tab">—</dd></div>
+            <div><dt>uptime</dt><dd id="uptime">—</dd></div>
+          </dl>
+          <div class="bars">
+            <label>health <span id="hp-n">—</span></label>
+            <div class="bar hp" id="hp"><i></i></div>
+            <label>food <span id="food-n">—</span></label>
+            <div class="bar food" id="food"><i></i></div>
+          </div>
+          <p class="fault" id="fault" hidden></p>
+          <div class="captcha-banner" id="captcha-banner" hidden>
+            <div class="captcha-head">
+              <strong>Anti-bot / captcha</strong>
+              <button type="button" class="captcha-dismiss" id="captcha-dismiss" title="Dismiss">×</button>
+            </div>
+            <p class="captcha-reason" id="captcha-reason"></p>
+            <p class="captcha-code" id="captcha-code" hidden></p>
+            <div class="captcha-links" id="captcha-links"></div>
+            <p class="captcha-hint">Open a link, verify, then turn Online back on or use Manage → Start.</p>
+          </div>
+        </div>
+
+        <div class="card-block">
+          <h3 class="subhead">Nearby <span id="player-count"></span></h3>
+          <ul id="players" class="list"></ul>
+        </div>
+
+        <div class="card-block mc-inv-card">
+          <div class="pack-head">
+            <h3 class="subhead">Inventory</h3>
+            <p class="hint" id="pack-held">hands empty</p>
+          </div>
+          <div class="mc-inv" id="inv">
+            <div class="mc-inv-equip">
+              <div class="mc-armor" id="inv-gear" title="Armor"></div>
+              <div class="mc-figure" aria-hidden="true">
+                <div class="mc-steve">
+                  <span class="mc-head"></span>
+                  <span class="mc-torso"></span>
+                  <span class="mc-arms"></span>
+                  <span class="mc-legs"></span>
+                </div>
+                <p class="mc-figure-label">equipment</p>
+              </div>
+              <div class="mc-offhand-col">
+                <div class="mc-offhand" id="inv-offhand" title="Offhand"></div>
+                <span class="mc-slot-label">off</span>
+              </div>
+            </div>
+            <div class="mc-inv-storage">
+              <div class="inv-main" id="inv-main"></div>
+            </div>
+            <div class="mc-inv-hotbar">
+              <div class="inv-hot" id="inv-hot"></div>
+            </div>
+          </div>
+          <p class="inv-name" id="inv-name">click a slot · click another to swap</p>
+          <div class="inv-acts">
+            <button type="button" data-inv="hold">hold</button>
+            <button type="button" data-inv="drop">drop</button>
+            <button type="button" data-inv="dropStack">toss</button>
+            <button type="button" data-inv="equip">equip</button>
+            <button type="button" data-inv="offhand">offhand</button>
+            <button type="button" data-inv="use">use</button>
+          </div>
+        </div>
+
+        <div class="card-block">
+          <h3 class="subhead">Steer</h3>
+          <p class="hint">WASD move · space jump · shift sneak · R sprint</p>
+          <div class="pad" aria-hidden="true">
+            <b data-k="forward">W</b>
+            <div class="row">
+              <b data-k="left">A</b>
+              <b data-k="back">S</b>
+              <b data-k="right">D</b>
+            </div>
+          </div>
+          <form id="goto" class="goto">
+            <input name="x" placeholder="x" inputmode="decimal" />
+            <input name="y" placeholder="y" inputmode="decimal" />
+            <input name="z" placeholder="z" inputmode="decimal" />
+            <button type="submit">goto</button>
+          </form>
+        </div>
+
+        <div class="card-block survey-block" id="survey-slot-play">
+          <div class="survey-mount" id="survey-mount-play"></div>
+        </div>
+
+        <div class="card-block wire-block" data-wire-root="play">
+          <div class="wire-head">
+            <h3 class="subhead">Wire</h3>
+            <span class="wire-hint mute">Main + whisper tabs (6b-style)</span>
+          </div>
+          <div class="wire-tabs" id="wire-tabs" role="tablist" aria-label="Chat tabs"></div>
+          <ol class="log wire-log" id="log"></ol>
+          <form id="say" class="say say-with-suggest">
+            <div class="say-field">
+              <input id="say-input" autocomplete="off" spellcheck="false" placeholder="say in chat, or /command" />
+              <ul id="say-suggest" class="say-suggest" hidden role="listbox"></ul>
+            </div>
+            <button type="submit">send</button>
+          </form>
         </div>
       </section>
 
-      <section class="panel activity" id="activity-panel">
+      <!-- ========== MAP ========== -->
+      <section class="panel detect-panel tab-panel" id="detect-panel" data-tab="detect" role="tabpanel" hidden>
+        <div class="section-head">
+          <div>
+            <h2>Detection</h2>
+            <p class="hint">Players entering/leaving render range, end crystals, TNT, explosions, and combat. Times are local.</p>
+          </div>
+          <button type="button" class="tab-settings-btn" data-open-settings="detect" title="Detection settings">⚙ Settings</button>
+        </div>
+        <div class="detect-log card-block">
+          <div class="panel-head-row">
+            <h3>Event log</h3>
+            <button type="button" id="detect-clear" class="ghost">Clear</button>
+          </div>
+          <ol id="detect-log" class="detect-log-list"></ol>
+        </div>
+      </section>
+
+      <section class="panel map-panel tab-panel" id="map-panel" data-tab="map" role="tabpanel" hidden>
+        <div class="section-head">
+          <div>
+            <h2>Map</h2>
+            <p class="hint">Elytra terrain job for the selected profile</p>
+          </div>
+          <button type="button" class="tab-settings-btn" data-open-settings="map" title="Map settings">⚙ Settings</button>
+        </div>
+
+        <div class="card-block">
+          <div class="switch-grid">
+            <label class="task-toggle" data-feat="map">
+              <span class="tt-text"><strong>Map</strong><small>Elytra terrain survey</small></span>
+              <input type="checkbox" name="map" role="switch" />
+              <span class="tt-switch" aria-hidden="true"></span>
+            </label>
+          </div>
+          <label class="map-mode-row">Map mode
+            <select name="mapMode" id="map-mode-select">
+              <option value="box">Box</option>
+              <option value="ring">Ring</option>
+              <option value="spawn">Spawn</option>
+              <option value="highway">Highway</option>
+              <option value="north">North</option>
+            </select>
+          </label>
+          <div class="job-card" id="mapping-card">
+            <p class="job-line"><span class="pill" id="map-active-pill" data-tone="neutral">idle</span>
+              <span id="map-mode-label">mode —</span></p>
+            <p class="job-line" id="map-progress">covered — / —</p>
+            <p class="job-line mute" id="map-output">output —</p>
+            <p class="job-line warn" id="map-stall" hidden>⚠ mapping stall — no progress recently</p>
+          </div>
+        </div>
+
+        <div class="card-block survey-block" id="survey-slot-map">
+          <div class="survey-mount" id="survey-mount-map"></div>
+        </div>
+
+        <div class="card-block">
+          <h3 class="subhead">Steer</h3>
+          <p class="hint">WASD · space jump · shift sneak · R sprint</p>
+          <div class="pad" aria-hidden="true">
+            <b data-k="forward">W</b>
+            <div class="row">
+              <b data-k="left">A</b>
+              <b data-k="back">S</b>
+              <b data-k="right">D</b>
+            </div>
+          </div>
+          <form id="goto-map" class="goto">
+            <input name="x" placeholder="x" inputmode="decimal" />
+            <input name="y" placeholder="y" inputmode="decimal" />
+            <input name="z" placeholder="z" inputmode="decimal" />
+            <button type="submit">goto</button>
+          </form>
+        </div>
+
+        <div class="card-block wire-block" data-wire-root="map">
+          <div class="wire-head">
+            <h3 class="subhead">Wire</h3>
+            <span class="wire-hint mute">Same tabs as Play</span>
+          </div>
+          <div class="wire-tabs" id="wire-tabs-map" role="tablist" aria-label="Chat tabs"></div>
+          <ol class="log wire-log" id="log-map"></ol>
+          <form id="say-map" class="say say-with-suggest">
+            <div class="say-field">
+              <input id="say-input-map" autocomplete="off" spellcheck="false" placeholder="say in chat, or /command" />
+              <ul id="say-suggest-map" class="say-suggest" hidden role="listbox"></ul>
+            </div>
+            <button type="submit">send</button>
+          </form>
+        </div>
+      </section>
+
+      <!-- ========== ANNOUNCE ========== -->
+      <section class="panel announce-panel tab-panel" id="announce-panel" data-tab="announce" role="tabpanel" hidden>
+        <div class="section-head">
+          <div>
+            <h2>Announce</h2>
+            <p class="hint" id="announce-for">Select a profile first</p>
+          </div>
+          <button type="button" class="tab-settings-btn" data-open-settings="announce" title="Announce settings">⚙ Settings</button>
+        </div>
+        <div class="card-block">
+          <div class="switch-grid">
+            <label class="task-toggle" data-feat="announcements">
+              <span class="tt-text"><strong>Announce</strong><small>Timed chat for this profile</small></span>
+              <input type="checkbox" name="announcements" role="switch" />
+              <span class="tt-switch" aria-hidden="true"></span>
+            </label>
+          </div>
+          <label class="map-mode-row">Messages (JSON)
+            <textarea id="announce-json" rows="8" placeholder='[{"message":"Hello","intervalMs":300000}]'></textarea>
+          </label>
+          <button type="button" id="announce-save" class="primary">Save messages</button>
+          <p class="hint">Saved on this profile. Interval is milliseconds (300000 = 5 min).</p>
+        </div>
+      </section>
+
+      <!-- ========== SETTINGS (general / process + dashboard) ========== -->
+      <section class="panel settings tab-panel" id="settings-panel" data-tab="settings" role="tabpanel" hidden>
+        <div class="settings-head">
+          <div>
+            <h2>Settings</h2>
+            <p class="hint">Dashboard + process controls (everything else lives under each tab’s ⚙)</p>
+          </div>
+        </div>
+
+        <div class="card-block dashboard-prefs">
+          <h3 class="subhead">3D terrain view</h3>
+          <p class="hint">This browser only — not stored in profile files.</p>
+          <label class="task-toggle on" id="view3d-toggle-row">
+            <input type="checkbox" id="toggle-view3d" checked />
+            <span class="tt-text">
+              <strong>Enable 3D view</strong>
+              <small>Fetches block mesh · off = zero terrain traffic</small>
+            </span>
+          </label>
+          <label class="settings-row view3d-quality-row">
+            Quality
+            <select id="view3d-quality">
+              <option value="lite" selected>Lite (low data · default)</option>
+              <option value="full">Full (more detail)</option>
+            </select>
+          </label>
+          <p class="hint" id="view3d-state">3D on · lite</p>
+        </div>
+
+        <div class="card-block">
+          <h3 class="subhead">Process (control API)</h3>
+          <p class="hint" id="settings-path">Settings/settings.json — applies to the whole bot process</p>
+          <form id="settings-form" class="settings-form settings-form-process"></form>
+          <p class="settings-msg" id="settings-msg-global" hidden></p>
+          <div class="settings-actions">
+            <button type="button" id="settings-reload" class="ghost">Reload</button>
+            <button type="button" id="settings-save-global" class="primary">Save process</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab settings drawer (per-profile fields, one place each) -->
+      <div id="tab-settings-overlay" class="tab-settings-overlay" hidden>
+        <div class="tab-settings-sheet" role="dialog" aria-modal="true" aria-labelledby="tab-settings-title">
+          <div class="tab-settings-head">
+            <h3 id="tab-settings-title">Settings</h3>
+            <button type="button" id="tab-settings-close" class="ghost" aria-label="Close">×</button>
+          </div>
+          <p class="hint" id="tab-settings-path">Select a profile first</p>
+          <form id="profile-settings-form" class="settings-form tab-settings-body">
+            <!-- PLAY -->
+            <div class="tab-settings-block" data-for="play">
+              <label>Host override<input name="host" placeholder="Process / default host" /></label>
+              <label>Port override<input name="port" type="number" placeholder="25565" /></label>
+              <label>Protocol version<input name="version" placeholder="1.21.11" /></label>
+              <label>View distance<input name="viewDistance" type="number" min="2" max="32" placeholder="8" /></label>
+              <label>Auto-lobby
+                <select name="autoLobby">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Auto-reconnect
+                <select name="autoReconnect">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Server portals required
+                <input name="requiredServerPortals" type="number" min="0" max="8" placeholder="2" />
+              </label>
+              <label>Portal retry (ms)
+                <input name="portalRetryMs" type="number" min="1000" step="500" placeholder="8000" />
+              </label>
+              <label>Reconnect delay (ms)
+                <input name="reconnectMs" type="number" min="500" step="500" placeholder="5000" />
+              </label>
+              <label>Reconnect max (ms)
+                <input name="reconnectMaxMs" type="number" min="1000" step="1000" placeholder="120000" />
+              </label>
+              <label>Rate-limit cooldown (ms)
+                <input name="rateLimitCooldownMs" type="number" min="0" step="1000" placeholder="45000" />
+              </label>
+              <label>Captcha cooldown (ms, 0=halt)
+                <input name="captchaCooldownMs" type="number" min="0" step="1000" placeholder="3600000" />
+              </label>
+            </div>
+            <!-- MAP -->
+            <div class="tab-settings-block" data-for="map" hidden>
+              <label>Map mode
+                <select name="mapMode">
+                  <option value="box">Box</option>
+                  <option value="ring">Ring</option>
+                  <option value="spawn">Spawn</option>
+                  <option value="highway">Highway</option>
+                  <option value="north">North</option>
+                </select>
+              </label>
+              <label>Home name<input name="mapHomeName" placeholder="spawn" /></label>
+              <label>Output dir<input name="mapOutputDir" placeholder="./output" /></label>
+              <label>Auto-start mapping
+                <select name="mapAutoStart">
+                  <option value="false">Off</option>
+                  <option value="true">On</option>
+                </select>
+              </label>
+              <div class="settings-row-grid">
+                <label>Box X1<input name="mapBoxX1" type="number" placeholder="20000" /></label>
+                <label>Box Z1<input name="mapBoxZ1" type="number" placeholder="20000" /></label>
+                <label>Box X2<input name="mapBoxX2" type="number" placeholder="24000" /></label>
+                <label>Box Z2<input name="mapBoxZ2" type="number" placeholder="24000" /></label>
+              </div>
+            </div>
+            <!-- ANNOUNCE -->
+            <div class="tab-settings-block" data-for="announce" hidden>
+              <p class="hint">Toggle announce on the Announce tab. Edit timed messages in the JSON box there — saved per profile.</p>
+            </div>
+            <!-- DETECT -->
+            <div class="tab-settings-block" data-for="detect" hidden>
+              <p class="hint">What to log, and how often to re-scan loaded entities (fixes missed leave events after teleports).</p>
+              <label>Player recheck interval (ms)
+                <input name="detectionRecheckMs" type="number" min="500" step="500" placeholder="3000" />
+              </label>
+              <label>Detect players
+                <select name="detectionPlayers">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Detect crystals
+                <select name="detectionCrystals">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Detect TNT
+                <select name="detectionTnt">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Detect explosions
+                <select name="detectionExplosions">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Detect combat (attacked / death)
+                <select name="detectionCombat">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+
+              <p class="hint" style="margin-top:0.85rem">Push notifications (this browser / phone). Requires notification permission — same as captcha alerts.</p>
+              <label>Notify: player entered range
+                <select name="notifyPlayerEnter">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Notify: player left range
+                <select name="notifyPlayerLeave">
+                  <option value="false">Off</option>
+                  <option value="true">On</option>
+                </select>
+              </label>
+              <label>Notify: combat (attacked / death)
+                <select name="notifyCombat">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Notify: crystals
+                <select name="notifyCrystals">
+                  <option value="false">Off</option>
+                  <option value="true">On</option>
+                </select>
+              </label>
+              <label>Notify: TNT
+                <select name="notifyTnt">
+                  <option value="false">Off</option>
+                  <option value="true">On</option>
+                </select>
+              </label>
+              <label>Notify: explosions
+                <select name="notifyExplosions">
+                  <option value="false">Off</option>
+                  <option value="true">On</option>
+                </select>
+              </label>
+              <label>Only notify when tab is in background
+                <select name="notifyOnlyHidden">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+            </div>
+          </form>
+          <p class="settings-msg" id="settings-msg" hidden></p>
+          <div class="settings-actions tab-settings-actions">
+            <button type="button" id="settings-save" class="primary">Save for profile</button>
+            <button type="button" id="tab-settings-close-bottom" class="ghost">Close</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== LOG ========== -->
+      <section class="panel activity tab-panel" id="activity-panel" data-tab="log" role="tabpanel" hidden>
         <h2>Activity</h2>
         <ol id="activity-log" class="activity-log"></ol>
       </section>
+
+      <!-- hidden legacy hooks kept for JS compatibility -->
+      <span id="hunt-state" hidden>hunt off</span>
+      <form id="tasks-form" hidden>
+        <input type="checkbox" name="online" />
+        <input type="checkbox" name="announcements" />
+        <input type="checkbox" name="antiAfk" />
+        <input type="checkbox" name="hunt" />
+        <input type="checkbox" name="map" />
+        <select name="mapMode"><option value="box">box</option></select>
+      </form>
     </main>
+      </div><!-- .shell-main -->
+    </div><!-- .app-shell -->
+
+    <!-- Shared 3D survey — moved between Play and Map -->
+    <div id="survey-shared" class="survey-shared" hidden>
+      <div class="survey-head">
+        <div>
+          <h3 class="subhead">3D view</h3>
+          <p class="hint" id="survey-hint">follow: WASD steers · orbit: click stage · esc</p>
+        </div>
+        <p class="survey-meta" id="survey-meta">no terrain yet</p>
+        <div class="survey-tools">
+          <button type="button" class="rad" data-r="14">14m</button>
+          <button type="button" class="rad on" data-r="20">20m</button>
+          <button type="button" class="rad" data-r="28">28m</button>
+          <button type="button" id="survey-follow">follow</button>
+          <button type="button" id="survey-orbit" class="on">orbit</button>
+        </div>
+      </div>
+      <div class="survey-stage">
+        <canvas id="world3d" tabindex="0" aria-label="3D survey of blocks around the bot"></canvas>
+        <div class="crosshair" aria-hidden="true"></div>
+        <p class="survey-hud" id="survey-hud">aim into the void</p>
+        <p class="survey-compass" id="survey-compass">N</p>
+      </div>
+    </div>
+
     <script src="/survey.js"></script>
     <script src="/app.js"></script>
   </body>

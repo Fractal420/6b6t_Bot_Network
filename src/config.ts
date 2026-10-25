@@ -1,19 +1,18 @@
-import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import dotenv from "dotenv";
+import {
+  getSettingsValues,
+  loadSettingsDocument,
+  saveSettingsMap,
+  setSettingsValue,
+  settingsFilePath,
+  settingsDir,
+} from "./settings/store.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-function envFileCandidates(): string[] {
-  const cwdEnv = path.resolve(process.cwd(), ".env");
-  const packageEnv = path.resolve(root, ".env");
-  return cwdEnv === packageEnv ? [packageEnv] : [cwdEnv, packageEnv];
-}
-
-for (const envPath of envFileCandidates()) {
-  dotenv.config({ path: envPath });
-}
+// Load Settings/settings.json (migrates from .env on first run) into process.env
+loadSettingsDocument();
 
 function envString(name: string, fallback = ""): string {
   const value = process.env[name];
@@ -63,6 +62,13 @@ export interface FractalConfig {
   mapHomeName: string;
   mapBox: { x1: number; z1: number; x2: number; z2: number };
   mapAutoStart: boolean;
+  /** How often to re-scan loaded player entities (ms). Fixes missed leave events after teleports. */
+  detectionRecheckMs: number;
+  detectionPlayers: boolean;
+  detectionCrystals: boolean;
+  detectionTnt: boolean;
+  detectionExplosions: boolean;
+  detectionCombat: boolean;
   discordEnabled: boolean;
   discordToken: string;
   discordChannelId: string;
@@ -87,7 +93,7 @@ export function loadConfig(overrides: Partial<FractalConfig> = {}): FractalConfi
     controlPort: envNumber("CONTROL_PORT", 37637),
     controlToken: envString("CONTROL_TOKEN"),
     requiredServerPortals: envNumber("SERVER_PORTALS", 2),
-    portalRetryMs: envNumber("PORTAL_RETRY_MS", 60_000),
+    portalRetryMs: envNumber("PORTAL_RETRY_MS", 3_000),
     reconnectMs: envNumber("RECONNECT_MS", 8_000),
     reconnectMaxMs: envNumber("RECONNECT_MAX_MS", 300_000),
     rateLimitCooldownMs: envNumber("RATE_LIMIT_COOLDOWN_MS", 45_000),
@@ -103,6 +109,12 @@ export function loadConfig(overrides: Partial<FractalConfig> = {}): FractalConfi
       z2: envNumber("MAP_BOX_Z2", 24000),
     },
     mapAutoStart: envString("MAP_AUTO_START", "0") === "1",
+    detectionRecheckMs: envNumber("DETECTION_RECHECK_MS", 3_000),
+    detectionPlayers: envString("DETECTION_PLAYERS", "1") !== "0",
+    detectionCrystals: envString("DETECTION_CRYSTALS", "1") !== "0",
+    detectionTnt: envString("DETECTION_TNT", "1") !== "0",
+    detectionExplosions: envString("DETECTION_EXPLOSIONS", "1") !== "0",
+    detectionCombat: envString("DETECTION_COMBAT", "1") !== "0",
     discordEnabled: envString("DISCORD_ENABLED", "0") === "1",
     discordToken: envString("DISCORD_TOKEN", ""),
     discordChannelId: envString("DISCORD_CHANNEL_ID", ""),
@@ -118,10 +130,10 @@ export function loadConfig(overrides: Partial<FractalConfig> = {}): FractalConfi
 
 export function assertJoinConfig(config: FractalConfig): void {
   if (!config.username) {
-    throw new Error("Missing username. Set MC_USERNAME in .env");
+    throw new Error("Missing username. Set MC_USERNAME in Settings/settings.json (or a profile)");
   }
   if (config.auth === "offline" && !config.password) {
-    throw new Error("Missing in-game password. Set MC_PASSWORD in .env");
+    throw new Error("Missing in-game password. Set MC_PASSWORD in Settings/settings.json (or a profile)");
   }
 }
 
@@ -129,29 +141,17 @@ export function credentialsExist(config: FractalConfig): boolean {
   return Boolean(config.username && (config.auth !== "offline" || config.password));
 }
 
+/** Path to the global settings file (Settings/settings.json). */
 export function configPath(): string {
-  for (const envPath of envFileCandidates()) {
-    if (fs.existsSync(envPath)) return envPath;
-  }
-  return path.join(process.cwd(), ".env");
+  return settingsFilePath();
+}
+
+export function settingsFolderPath(): string {
+  return settingsDir();
 }
 
 export function upsertEnvVar(key: string, value: string): void {
-  if (!/^[A-Z0-9_]+$/.test(key)) throw new Error("invalid env key");
-  if (/[\r\n]/.test(value)) throw new Error("invalid env value");
-  const envPath = configPath();
-  const line = `${key}=${value}`;
-  let text = "";
-  if (fs.existsSync(envPath)) {
-    text = fs.readFileSync(envPath, "utf8");
-    const re = new RegExp(`^${key}=.*$`, "m");
-    text = re.test(text) ? text.replace(re, line) : `${text.replace(/\s*$/, "")}\n${line}\n`;
-    fs.writeFileSync(envPath, text, { mode: 0o600 });
-    fs.chmodSync(envPath, 0o600);
-  } else {
-    fs.writeFileSync(envPath, `${line}\n`, { mode: 0o600 });
-  }
-  process.env[key] = value;
+  setSettingsValue(key, value);
 }
 
 export type SettingsFieldType = "string" | "number" | "boolean" | "password" | "select";
@@ -168,51 +168,39 @@ export interface SettingsFieldDef {
   help?: string;
 }
 
-/** All .env knobs editable from the web UI */
+/** Process-level knobs (Settings tab). Profile knobs live under each tab’s ⚙. */
 export const SETTINGS_FIELDS: SettingsFieldDef[] = [
-  { key: "MC_HOST", label: "Server host", group: "Minecraft", type: "string" },
-  { key: "MC_PORT", label: "Server port", group: "Minecraft", type: "number" },
-  { key: "MC_USERNAME", label: "Username", group: "Minecraft", type: "string" },
-  { key: "MC_PASSWORD", label: "In-game password", group: "Minecraft", type: "password", secret: true },
-  { key: "MC_AUTH", label: "Auth mode", group: "Minecraft", type: "select", options: ["offline", "microsoft"] },
-  { key: "MC_VERSION", label: "Protocol version", group: "Minecraft", type: "string" },
-  { key: "MC_VIEW_DISTANCE", label: "View distance (chunks)", group: "Minecraft", type: "number" },
-
-  { key: "SERVER_PORTALS", label: "Server portals required", group: "Lobby", type: "number" },
-  { key: "PORTAL_RETRY_MS", label: "Portal retry (ms)", group: "Lobby", type: "number" },
-
-  { key: "RECONNECT_MS", label: "Base reconnect (ms)", group: "Reconnect", type: "number" },
-  { key: "RECONNECT_MAX_MS", label: "Max reconnect backoff (ms)", group: "Reconnect", type: "number" },
-  { key: "RATE_LIMIT_COOLDOWN_MS", label: "Rate-limit cooldown (ms)", group: "Reconnect", type: "number" },
-  { key: "CAPTCHA_COOLDOWN_MS", label: "Captcha cooldown (ms, 0=halt)", group: "Reconnect", type: "number" },
-
   { key: "CONTROL_HOST", label: "Control API host", group: "Control API", type: "string", restart: true },
   { key: "CONTROL_PORT", label: "Control API port", group: "Control API", type: "number", restart: true },
   { key: "CONTROL_TOKEN", label: "Control token", group: "Control API", type: "password", secret: true, restart: true },
-
-  { key: "MAP_OUTPUT_DIR", label: "Mapper output dir", group: "Elytra map", type: "string" },
-  { key: "MAP_MODE", label: "Default map mode", group: "Elytra map", type: "string", help: "box, spawn, ring, north, …" },
-  { key: "MAP_HOME_NAME", label: "Home name", group: "Elytra map", type: "string" },
-  { key: "MAP_BOX_X1", label: "Box X1", group: "Elytra map", type: "number" },
-  { key: "MAP_BOX_Z1", label: "Box Z1", group: "Elytra map", type: "number" },
-  { key: "MAP_BOX_X2", label: "Box X2", group: "Elytra map", type: "number" },
-  { key: "MAP_BOX_Z2", label: "Box Z2", group: "Elytra map", type: "number" },
-  { key: "MAP_AUTO_START", label: "Auto-start mapping", group: "Elytra map", type: "boolean" },
-
+  {
+    key: "CONTROL_EXPOSE",
+    label: "Expose API off loopback",
+    group: "Control API",
+    type: "boolean",
+    restart: true,
+    help: "Dangerous: allows non-localhost clients when token is set",
+  },
   { key: "DISCORD_ENABLED", label: "Discord enabled", group: "Discord", type: "boolean", restart: true },
   { key: "DISCORD_TOKEN", label: "Discord bot token", group: "Discord", type: "password", secret: true, restart: true },
   { key: "DISCORD_CHANNEL_ID", label: "Discord channel ID", group: "Discord", type: "string", restart: true },
   { key: "DISCORD_MIRROR_LOGS", label: "Mirror logs to Discord", group: "Discord", type: "boolean", restart: true },
-
+  { key: "MC_HOST", label: "Default server host", group: "Defaults", type: "string" },
+  { key: "MC_HOSTS", label: "Host failover list", group: "Defaults", type: "string", help: "Comma-separated" },
+  { key: "MC_PORT", label: "Default server port", group: "Defaults", type: "number" },
+  { key: "MC_VERSION", label: "Default protocol version", group: "Defaults", type: "string" },
 ];
 
 function readEnvRaw(key: string): string {
+  const stored = getSettingsValues()[key];
+  if (stored !== undefined) return stored;
   return process.env[key] ?? "";
 }
 
 /** Snapshot for the settings UI (secrets returned as empty unless set — use placeholder). */
 export function getSettingsSnapshot(): {
   path: string;
+  folder: string;
   fields: Array<SettingsFieldDef & { value: string; hasSecret?: boolean }>;
 } {
   const fields = SETTINGS_FIELDS.map((def) => {
@@ -229,17 +217,18 @@ export function getSettingsSnapshot(): {
     }
     return { ...def, value: raw };
   });
-  return { path: configPath(), fields };
+  return { path: configPath(), folder: settingsDir(), fields };
 }
 
 /**
- * Persist key/value pairs to .env and process.env.
+ * Persist key/value pairs to Settings/settings.json and process.env.
  * Empty password fields are skipped (keep existing secret).
  */
 export function saveSettingsValues(values: Record<string, string>): { saved: string[]; skipped: string[] } {
   const allowed = new Set(SETTINGS_FIELDS.map((f) => f.key));
-  const saved: string[] = [];
+  const prepared: Record<string, string> = {};
   const skipped: string[] = [];
+  const secretKeys = new Set<string>();
   for (const [key, value] of Object.entries(values)) {
     if (!allowed.has(key)) {
       skipped.push(key);
@@ -248,6 +237,7 @@ export function saveSettingsValues(values: Record<string, string>): { saved: str
     const def = SETTINGS_FIELDS.find((f) => f.key === key)!;
     if (def.secret && (value === undefined || value === "")) {
       skipped.push(key);
+      secretKeys.add(key);
       continue;
     }
     let v = String(value ?? "");
@@ -257,13 +247,14 @@ export function saveSettingsValues(values: Record<string, string>): { saved: str
     if (def.type === "number" && v !== "" && !Number.isFinite(Number(v))) {
       throw new Error(`${key} must be a number`);
     }
-    upsertEnvVar(key, v);
-    saved.push(key);
+    prepared[key] = v;
   }
-  return { saved, skipped };
+  const result = saveSettingsMap(prepared, { skipEmptySecrets: secretKeys });
+  return { saved: result.saved, skipped: [...skipped, ...result.skipped] };
 }
 
-/** Build a FractalConfig from current process.env (after save). */
+/** Build a FractalConfig from current Settings store. */
 export function reloadConfigFromEnv(): FractalConfig {
+  loadSettingsDocument();
   return loadConfig();
 }

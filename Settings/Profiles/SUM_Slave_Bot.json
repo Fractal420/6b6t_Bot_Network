@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "account": {
+    "id": "ce2f16af-c9df-4843-b2aa-816f10d5d752",
+    "username": "SUM_Slave_Bot",
+    "password": "v2co5zWtrsCUe",
+    "auth": "offline",
+    "enabled": false,
+    "features": {
+      "online": true,
+      "hunt": false,
+      "map": false,
+      "mapMode": "box",
+      "announcements": false,
+      "antiAfk": true
+    },
+    "profile": {
+      "autoLobby": true,
+      "autoReconnect": true,
+      "viewDistance": 32,
+      "mapOutputDir": "./output",
+      "mapMode": "box",
+      "mapHomeName": "spawn",
+      "mapBox": {
+        "x1": 20000,
+        "z1": 20000,
+        "x2": 24000,
+        "z2": 24000
+      },
+      "mapAutoStart": false,
+      "detectionRecheckMs": 3000,
+      "detectionPlayers": true,
+      "detectionCrystals": true,
+      "detectionTnt": true,
+      "detectionExplosions": true,
+      "detectionCombat": true
+    }
+  }
+}

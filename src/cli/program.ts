@@ -396,9 +396,17 @@ async function runSession(
   }
 
   const bot = fleet.resolveBot(null);
-  if (bot) await startRepl(bot);
-  else log.warn("No bot running — add accounts in the web Fleet panel or accounts.json");
-  await shutdown();
+  if (bot) {
+    await startRepl(bot);
+    await shutdown();
+    return;
+  }
+
+  // No bot yet — keep the control API / dashboard alive so the user can add
+  // accounts via the web Fleet panel or accounts.json, then start them.
+  log.warn("No bot running — add accounts in the web Fleet panel or accounts.json");
+  log.info(`Dashboard at ${server.url}  ·  Fleet accounts: ${fleet.listAccounts().length}`);
+  log.info("Server staying up. Press Ctrl+C to stop.");
 }
 
 async function proxyOrFail(config: FractalConfig, request: ControlRequest) {
