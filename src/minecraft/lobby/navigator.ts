@@ -78,7 +78,7 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
   const huntOnce = async (): Promise<boolean> => {
     if (!bot.entity) return false;
     const worldKind = hooks.getWorldKind();
-    if (!hooks.allowServerPortals() || (!isLobbyLike(worldKind) && worldKind !== "unknown")) {
+    if (!hooks.allowServerPortals() || worldKind === "backup" || (!isLobbyLike(worldKind) && worldKind !== "unknown")) {
       return false;
     }
 
@@ -202,7 +202,7 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
         hunting = false;
         break;
       }
-      if (!isLobbyLike(worldKind) && worldKind !== "unknown") {
+      if (worldKind === "backup" || (!isLobbyLike(worldKind) && worldKind !== "unknown")) {
         hunting = false;
         break;
       }

@@ -11,14 +11,28 @@ npm install
 cp .env.example .env
 ```
 
-Put the offline username and in-game password in `.env` (never commit that file):
+Put the offline username and in-game password in `.env` (never commit that file). See `.env.example` for the full list:
 
 ```
-FRACTAL_HOST=alt3.6b6t.org
-FRACTAL_USERNAME=your_account
-FRACTAL_PASSWORD=...
-FRACTAL_AUTH=offline
-FRACTAL_VERSION=1.21.11
+# Minecraft server
+MC_HOST=alt3.6b6t.org
+MC_PORT=25565
+MC_USERNAME=your_account
+MC_PASSWORD=...
+MC_AUTH=offline
+MC_VERSION=1.21.11
+MC_VIEW_DISTANCE=6
+
+# Local control API
+CONTROL_HOST=127.0.0.1
+CONTROL_PORT=37637
+CONTROL_TOKEN=
+# CONTROL_EXPOSE=1
+
+# Lobby / reconnect behavior
+SERVER_PORTALS=2
+PORTAL_RETRY_MS=60000
+RECONNECT_MS=8000
 ```
 
 Optionally install the CLI on your PATH:
@@ -53,10 +67,10 @@ If a server portal cannot be found after join, the bot stays connected and retri
 
 ## Control API
 
-While the bot is running, a local API listens on `127.0.0.1:37637` only. It always requires `FRACTAL_CONTROL_TOKEN` (generated into `.env` on first run). The dashboard sets an HttpOnly cookie; CLI/curl send `Authorization: Bearer …`. `GET /health` stays unauthenticated (loopback-only). `GET /v1/catalog` requires the token.
+While the bot is running, a local API listens on `127.0.0.1:37637` only. It always requires `CONTROL_TOKEN` (generated into `.env` on first run). The dashboard sets an HttpOnly cookie; CLI/curl send `Authorization: Bearer …`. `GET /health` stays unauthenticated (loopback-only). `GET /v1/catalog` requires the token.
 
 ```bash
-TOKEN=$(grep '^FRACTAL_CONTROL_TOKEN=' .env | cut -d= -f2-)
+TOKEN=$(grep '^CONTROL_TOKEN=' .env | cut -d= -f2-)
 curl -s -H "authorization: Bearer $TOKEN" http://127.0.0.1:37637/v1/view?r=16
 curl -s -X POST http://127.0.0.1:37637/v1/rpc \
   -H "authorization: Bearer $TOKEN" \
@@ -105,9 +119,95 @@ RPC actions: see `GET /v1/catalog`. Common ones include `join`, `leave`, `contro
 3. `/login` with the stored password when the server asks.
 4. Offline accounts are sent to an End lobby island, then must walk **two server nether portals** (End island, then overworld sky lobby). The first lobby portal is a normal vanilla nether portal (2×3 interior). Decorative portal walls are ignored. Real nether portals in survival are ignored.
 5. Lobby portal transfers go through Velocity; the bot pauses physics during that configuration phase so it is not kicked.
-6. If kicked, reconnect. If a lobby portal is missing, wait a minute and scan again.
+6. If kicked, reconnect with smart backoff. If a lobby portal is missing, wait a minute and scan again.
+
+## Captcha / anti-bot kicks
+
+When the server kicks the bot with an anti-bot or captcha message:
+
+- The full kick reason is logged and emitted on the `kicked` event / WebSocket.
+- Any `http://` or `https://` links found in the message are extracted and printed clearly so you can open them.
+- The bot **never** tries to solve captchas itself.
+- Default behaviour: wait `CAPTCHA_COOLDOWN_MS` (1 hour) then retry. Set it to `0` to stop reconnecting until you manually restart after solving the captcha with a normal Minecraft client.
+
+Rate-limit / “logging in too fast” kicks use a shorter floor delay (`RATE_LIMIT_COOLDOWN_MS`).
+
+Normal kicks use exponential backoff up to `RECONNECT_MAX_MS`. Backoff only resets after the bot has stayed on the main world for ~90 seconds (avoids hammering on crash loops).
+
+## Connection robustness (best of both bots)
+
+| Feature | Behaviour |
+|---------|-----------|
+| Login | Smart `/login` + `/register`, title/window detection, AnarchyMod payload |
+| Portals | Vanilla 2×3 detection, pathfinder walk-in, two-portal flow, decorative walls ignored |
+| Velocity transfer | Movement packets blocked during configuration phase |
+| Captcha | Classified, links extracted, long cooldown / optional halt |
+| Rate-limit | Separate floor delay |
+| Backoff | Exponential + jitter, resets only after 90 s stable on main |
+| Corrupt chunks | Recoverable parse errors are skipped; bot stays connected |
+| Auth | Offline (default) or Microsoft (`MC_AUTH=microsoft`) |
+| Elytra mapping | Argus/Elytra mapper: Xaero regions, box/ring/highway modes |
+
+## Elytra terrain mapping
+
+Embedded **Mineflayer-Elytra-Mapper** flight + Xaero region writer (uses Fractal’s connection for login/portals/captcha).
+
+**In-game setup (once):**
+1. Far base outside the no-`/home` radius (~5k on 6b6t): bed (respawn) + ender chest full of elytras.
+2. Launch platform near the area to map; `/sethome <name>` (default home name `spawn`).
+3. Put that name in `MAP_HOME_NAME`.
+
+**Configure** box / mode in `.env` (`MAP_MODE`, `MAP_BOX_*`, `MAP_OUTPUT_DIR`).
+
+**Run:**
+```bash
+fractalbot join --daemon
+fractalbot map-start box          # or spawn, ring, north, ...
+fractalbot map-status
+fractalbot map-stop
+```
+
+Dashboard: **map start** / **map stop** buttons.  
+RPC: `mapStart`, `mapStop`, `mapStatus`, `mapConfig`.
+
+Regions land in `MAP_OUTPUT_DIR/regions/overworld/*.zip` (Xaero World Map compatible).
+
+## Discord remote control
+
+Optional. Install the dependency and set env:
+
+```bash
+npm install discord.js
+# .env
+DISCORD_ENABLED=1
+DISCORD_TOKEN=your_bot_token
+DISCORD_CHANNEL_ID=123456789012345678
+DISCORD_MIRROR_LOGS=1
+```
+
+Enable **Message Content Intent** for the bot in the Discord Developer Portal. Invite it to a private channel.
+
+| Command | Action |
+|---------|--------|
+| `!help` | List commands |
+| `!status` | Bot + mapper status |
+| `!join` / `!leave` / `!reconnect` | Session |
+| `!chat <msg>` / `!cmd <command>` | In-game chat / command |
+| `!hunt` / `!unhunt` | Lobby portal hunt |
+| `!map on [mode]` | Start elytra mapping |
+| `!map on box:x1,z1,x2,z2` | Map a box |
+| `!map off` / `!map status` | Stop / status |
+| `!captcha` | Last kick reason + captcha links |
+
+Captcha kicks are posted to the channel when mirror logs are on.
 
 ## Documentation
 
 - [Contributing](CONTRIBUTING.md)
 - [Code of Conducts](docs/CODE_OF_CONDUCT.md)
+
+## Multi-account fleet
+
+Accounts live in `accounts.json` (next to `.env`). Web **Fleet** panel: add accounts, assign tasks (`join` / `hunt` / `map` / `idle` / `leave`), start/stop each bot. Env `MC_USERNAME` seeds the first account on first run.
+
+RPC: `fleetStatus`, `fleetAddAccount`, `fleetStart`, `fleetSetTask`, `fleetStartAll`, …

@@ -48,6 +48,13 @@ export function scanIsland(bot: Bot, pos: { x: number; y: number; z: number }, r
   return { solid, water, airish, looksLikeIsland: waterIsland || voidIsland };
 }
 
+/**
+ * Prefer 6b6t-join-bot signals when available:
+ * - main = Fox (FasterVelocity), survival, ~1000 slots
+ * - lobby = Paper, adventure, ~10000 slots
+ * - backup/queue = Limbo / 1 slot
+ * Then fall back to dimension / island / portal heuristics.
+ */
 export function classifyWorld(bot: Bot, ctx: WorldContext): WorldKind {
   const dimension = String(bot.game?.dimension ?? "").toLowerCase();
   const pos = bot.entity?.position;
@@ -56,6 +63,25 @@ export function classifyWorld(bot: Bot, ctx: WorldContext): WorldKind {
   const inNether = dimension.includes("nether");
   const gameMode = String(bot.game?.gameMode ?? "").toLowerCase();
   const adventure = gameMode === "adventure" || gameMode === "1";
+  const survival = gameMode === "survival" || gameMode === "0";
+  const slots = Number(bot.game?.maxPlayers ?? 0);
+  const brand = String((bot as { brand?: string }).brand || (bot as { _client?: { brand?: string } })._client?.brand || "").toLowerCase();
+
+  // Queue / limbo (backup server)
+  if (/limbo|picolimbo/i.test(brand) || (slots === 1 && adventure)) {
+    return "backup";
+  }
+
+  // Main: Fox brand or classic 1000-slot survival
+  if ((/^fox\b/i.test(brand) || (survival && slots >= 800 && slots <= 1500)) && ctx.authenticated) {
+    if (!inNether && !inEnd) return "overworld";
+  }
+
+  // Lobby: Paper brand or large adventure capacity
+  if (/^paper\b/i.test(brand) || (adventure && slots >= 5000)) {
+    if (!ctx.authenticated && inEnd) return "auth";
+    return "lobby";
+  }
 
   if (inNether) {
     if (ctx.serverPortalsEntered < ctx.requiredServerPortals && (island?.looksLikeIsland || adventure)) return "lobby";
@@ -70,6 +96,7 @@ export function classifyWorld(bot: Bot, ctx: WorldContext): WorldKind {
   }
 
   if (!ctx.authenticated) return "auth";
+  if (!adventure && survival && slots >= 800) return "overworld";
   if (!adventure) return "overworld";
 
   if (adventure && pos && pos.y > 90) return "lobby";
@@ -94,5 +121,5 @@ export function isMainWorld(kind: WorldKind): boolean {
 }
 
 export function isLobbyLike(kind: WorldKind): boolean {
-  return kind === "auth" || kind === "lobby";
+  return kind === "auth" || kind === "lobby" || kind === "backup";
 }

@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import os from "node:os";
 import mineflayer, { type Bot } from "mineflayer";
 import { goals, pathfinder } from "../minecraft/pathfinder.ts";
@@ -9,12 +10,20 @@ import { attachAuth, type AuthController } from "../minecraft/auth.ts";
 import { attachProtocolCompat } from "../minecraft/protocolCompat.ts";
 import { attachVelocityTransfer } from "../minecraft/velocityTransfer.ts";
 import { sendCommand } from "../minecraft/command.ts";
+import { parseKick, kickReconnectBucket, type KickKind } from "../minecraft/kick.ts";
 import { redactSecrets } from "./security.ts";
 import { createPortalNavigator, type PortalNavigator } from "../minecraft/lobby/navigator.ts";
 import { classifyWorld, isLobbyLike, isMainWorld } from "../minecraft/lobby/worldKind.ts";
 import { dumpWorld, persistDump, topBlockCounts } from "../minecraft/probe.ts";
 import { findPortalBlocks } from "../minecraft/lobby/portals.ts";
 import { clampVoxelRadius, sampleVoxels } from "../minecraft/voxels.ts";
+import { createMapperBridge, type MapperHost, type MapperStatus } from "../mapper/bridge.ts";
+/** Corrupt-chunk / deserializer errors that vanilla clients ignore — stay connected. */
+const RECOVERABLE_PARSE_RE =
+  /Parse error|array size is abnormally large|Read error for|Chunk size|Deserialization error|PartialReadError|Read error/i;
+
+/** Only reset reconnect backoff after this long on the main world (ms). */
+const HEALTHY_STABLE_MS = 90_000;
 import {
   controlSnapshot,
   cursorBlock,
@@ -61,6 +70,11 @@ export class FractalBot extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private startedAt = 0;
   private lastKick?: string;
+  private lastKickKind?: KickKind;
+  private lastKickHint?: string;
+  private hostIndex = 0;
+  private lastKickLinks: string[] = [];
+  private lastVerificationCode?: string;
   private lastError?: BotErrorInfo;
   private faultJoinGeneration = -1;
   private reachedLogin = false;
@@ -70,11 +84,56 @@ export class FractalBot extends EventEmitter {
   private password: string;
   private invChain: Promise<unknown> = Promise.resolve();
   private jumpTimer: NodeJS.Timeout | null = null;
+  /** Current reconnect delay (exponential backoff). */
+  private reconnectDelayMs: number;
+  /** True when a captcha kick told us to stop auto-reconnect entirely. */
+  private captchaHalted = false;
+  private parseSkipCount = 0;
+  private lastParseSkipLoggedAt = 0;
+  private healthyResetTimer: NodeJS.Timeout | null = null;
+  private mapper: MapperHost;
 
   constructor(private config: FractalConfig) {
     super();
     this.password = config.password;
+    this.reconnectDelayMs = config.reconnectMs;
     this.setMaxListeners(50);
+    this.mapper = createMapperBridge({
+      getBot: () => this.bot,
+      outputDir: config.mapOutputDir,
+      mapping: {
+        mode: config.mapMode,
+        homeName: config.mapHomeName,
+        box: config.mapBox,
+        boxes: [],
+        skipSpawnRegions: true,
+        noHomeRadius: 5000,
+        homeCooldownSec: 315,
+      },
+      onRegion: (info) => {
+        log.info(`Mapped region written: ${JSON.stringify(info)}`);
+        this.emit("status", this.getStatus());
+      },
+    });
+  }
+
+  /**
+   * Apply live-safe config after settings were written to .env.
+   * Host/port/auth used on next join; Discord/control bind need restart.
+   */
+  applyRuntimeConfig(next: FractalConfig): void {
+    this.config = next;
+    this.password = next.password;
+    this.reconnectDelayMs = Math.min(this.reconnectDelayMs, next.reconnectMaxMs);
+    this.mapper.setMappingConfig({
+      mode: next.mapMode,
+      homeName: next.mapHomeName,
+      box: next.mapBox,
+      skipSpawnRegions: true,
+      noHomeRadius: 5000,
+      homeCooldownSec: 315,
+    });
+    this.emit("status", this.getStatus());
   }
 
   override on<U extends keyof FractalBotEvents>(event: U, listener: FractalBotEvents[U]): this {
@@ -112,12 +171,35 @@ export class FractalBot extends EventEmitter {
       players: bot ? Object.keys(bot.players).length : 0,
       uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
       lastKick: this.lastKick,
+      lastKickKind: this.lastKickKind,
+      lastKickLinks: this.lastKickLinks.length ? this.lastKickLinks : undefined,
+      lastVerificationCode: this.lastVerificationCode,
+      lastKickHint: this.lastKickHint,
       lastError: this.lastError ?? null,
       lastChat: this.lastChat,
-      autoReconnect: this.autoReconnect,
+      autoReconnect: this.autoReconnect && !this.captchaHalted,
       autoLobby: this.autoLobby,
       huntingPortal: Boolean(this.navigator?.hunting),
+      mapping: this.mapper.status(),
     };
+  }
+
+  startMapping(mode?: string): string {
+    if (!this.bot?.entity) return "not connected";
+    this.mapper.ensureBotHooks();
+    return this.mapper.start(mode || this.config.mapMode);
+  }
+
+  stopMapping(): string {
+    return this.mapper.stop();
+  }
+
+  getMappingStatus(): MapperStatus {
+    return this.mapper.status();
+  }
+
+  setMappingConfig(partial: Record<string, unknown>): void {
+    this.mapper.setMappingConfig(partial);
   }
 
   async join(options: JoinOptions = {}): Promise<void> {
@@ -133,6 +215,8 @@ export class FractalBot extends EventEmitter {
     if (options.autoLobby !== undefined) this.autoLobby = options.autoLobby;
 
     this.leaving = false;
+    this.captchaHalted = false;
+    this.reconnectDelayMs = this.config.reconnectMs;
     this.clearReconnect();
     await this.disconnectInternal("rejoin");
     this.connect();
@@ -381,30 +465,38 @@ export class FractalBot extends EventEmitter {
     this.startedAt = Date.now();
     this.setPhase("connecting");
 
+    const host = this.currentHost();
     const info = {
-      host: this.config.host,
+      host,
       port: this.config.port,
       username: this.config.username,
     };
     this.emit("connecting", info);
-    log.info(`Joining ${info.host}:${info.port} as ${info.username} (offline)`);
+    const authMode = this.config.auth === "microsoft" ? "microsoft" : "offline";
+    log.info(`Joining ${info.host}:${info.port} as ${info.username} (${authMode})`);
 
     let bot: Bot;
     try {
-      bot = mineflayer.createBot({
-        host: this.config.host,
+      const opts: Parameters<typeof mineflayer.createBot>[0] = {
+        host,
         port: this.config.port,
         username: this.config.username,
-        auth: "offline",
+        auth: authMode,
         version: this.config.version || undefined,
         brand: "fabric",
         hideErrors: true,
-        checkTimeoutInterval: 120_000,
+        checkTimeoutInterval: 45_000,
         keepAlive: true,
-      });
+        viewDistance: this.config.viewDistance,
+      };
+      if (authMode === "microsoft") {
+        opts.profilesFolder = "./auth_cache";
+      }
+      bot = mineflayer.createBot(opts);
     } catch (error) {
       this.bot = null;
       this.noteFault("connect", error);
+      this.rotateHost("connect-error");
       this.scheduleReconnect("connect");
       return;
     }
@@ -477,6 +569,22 @@ export class FractalBot extends EventEmitter {
       this.refreshWorld("respawn");
     });
 
+    bot.on("death", () => {
+      if (generation !== this.joinGeneration) return;
+      try {
+        this.mapper.onDeath();
+      } catch {
+        /* ignore */
+      }
+      setTimeout(() => {
+        try {
+          if (this.bot && generation === this.joinGeneration) this.bot.respawn();
+        } catch {
+          /* ignore */
+        }
+      }, 3000);
+    });
+
     bot.on("forcedMove", () => {
       if (generation !== this.joinGeneration) return;
       this.refreshWorld("forcedMove");
@@ -484,17 +592,59 @@ export class FractalBot extends EventEmitter {
 
     bot.on("kicked", (reason, loggedIn) => {
       if (generation !== this.joinGeneration) return;
-      const text = stringifyKick(reason);
-      this.lastKick = text;
-      this.noteFault("kick", loggedIn ? `kicked: ${text}` : `kicked before login: ${text}`);
-      log.warn(`Kicked (loggedIn=${loggedIn}): ${text}`);
+      const parsed = parseKick(reason, this.config.username);
+      this.lastKick = parsed.text;
+      this.lastKickKind = parsed.kind;
+      this.lastKickLinks = parsed.links;
+      this.lastVerificationCode = parsed.verificationCode;
+      this.lastKickHint = parsed.hint;
+
+      this.noteFault(
+        "kick",
+        loggedIn ? `kicked (${parsed.kind}): ${parsed.text}` : `kicked before login (${parsed.kind}): ${parsed.text}`,
+      );
+
+      log.warn(`Kicked (loggedIn=${loggedIn}, kind=${parsed.kind}): ${parsed.text}`);
+      if (parsed.hint) log.warn(`Hint: ${parsed.hint}`);
+      if (parsed.verificationCode) {
+        log.warn(`Verification code: ${parsed.verificationCode}`);
+      }
+      if (parsed.links.length > 0) {
+        log.warn("─── CAPTCHA / VERIFICATION LINK(S) ───");
+        for (const link of parsed.links) {
+          log.warn(`  ${link}`);
+        }
+        log.warn("Open the link above (enter the code if shown), then restart the bot.");
+        log.warn("─────────────────────────────────────");
+      } else if (parsed.kind === "captcha") {
+        log.warn(
+          "Anti-bot / captcha kick detected (no URL found). Log in with a normal Minecraft client to verify, then restart the bot.",
+        );
+      }
+
+      // Rotate host on some proxy/backend failures
+      if (
+        parsed.kind === "backend-unreachable" ||
+        parsed.kind === "connection-error" ||
+        parsed.kind === "ddos-blocked"
+      ) {
+        this.rotateHost("kick-" + parsed.kind);
+      }
+
       try {
-        log.warn(`Kick JSON: ${JSON.stringify(reason)}`);
+        log.debug(`Kick raw JSON: ${JSON.stringify(reason)}`);
       } catch {}
-      this.emit("kicked", text);
+
+      this.emit("kicked", {
+        reason: parsed.text,
+        kind: parsed.kind,
+        links: parsed.links,
+        verificationCode: parsed.verificationCode,
+        hint: parsed.hint,
+      });
       this.auth?.destroy();
       this.navigator?.stop();
-      this.scheduleReconnect("kicked");
+      this.scheduleReconnect("kicked", kickReconnectBucket(parsed.kind));
     });
 
     bot.on("end", (reason) => {
@@ -513,9 +663,44 @@ export class FractalBot extends EventEmitter {
     bot.on("error", (error) => {
       if (generation !== this.joinGeneration) return;
       const err = error instanceof Error ? error : new Error(String(error));
-      log.error("Bot error", err.message);
+      const msg = err.message || String(error);
+
+      // Recoverable parse errors (corrupt chunks that vanilla tolerates).
+      // Same approach as Elytra Mapper: log + stay connected instead of dying.
+      if (RECOVERABLE_PARSE_RE.test(msg)) {
+        this.parseSkipCount += 1;
+        const now = Date.now();
+        if (now - this.lastParseSkipLoggedAt > 60_000) {
+          this.lastParseSkipLoggedAt = now;
+          log.warn(
+            `Skipped ${this.parseSkipCount} unparseable packet(s) (corrupt chunk) and stayed connected. Latest: ${msg.slice(0, 140)}`,
+          );
+          this.parseSkipCount = 0;
+        }
+        return;
+      }
+
+      log.error("Bot error", msg);
       this.noteFault(this.reachedLogin ? "socket" : "connect", err);
       this.emit("error", err);
+    });
+
+    // Client-level packet errors sometimes surface on _client rather than bot
+    const rawClient = bot._client as unknown as { on: (e: string, fn: (...a: unknown[]) => void) => void };
+    rawClient.on("error", (error: unknown) => {
+      if (generation !== this.joinGeneration) return;
+      const msg = error instanceof Error ? error.message : String(error);
+      if (RECOVERABLE_PARSE_RE.test(msg)) {
+        this.parseSkipCount += 1;
+        const now = Date.now();
+        if (now - this.lastParseSkipLoggedAt > 60_000) {
+          this.lastParseSkipLoggedAt = now;
+          log.warn(
+            `Skipped ${this.parseSkipCount} unparseable packet(s) on client (corrupt chunk). Latest: ${msg.slice(0, 140)}`,
+          );
+          this.parseSkipCount = 0;
+        }
+      }
     });
   }
 
@@ -552,6 +737,33 @@ export class FractalBot extends EventEmitter {
     if (isMainWorld(kind) && this.authenticated) {
       this.navigator?.stop();
       this.setPhase("in_game");
+      this.captchaHalted = false;
+      // Mapper hooks (bot.hp.isOnMainServer, recorder, chunk prune)
+      try {
+        this.mapper.onMainServer();
+      } catch (e) {
+        log.warn("mapper onMainServer", e instanceof Error ? e.message : e);
+      }
+      if (this.config.mapAutoStart && !this.mapper.isActive()) {
+        setTimeout(() => {
+          if (this.phase !== "in_game" || this.mapper.isActive()) return;
+          log.info(`MAP_AUTO_START: ${this.startMapping()}`);
+        }, 8000);
+      }
+      // Only reset backoff after surviving HEALTHY_STABLE_MS on main (Elytra approach).
+      // Prevents a corrupt-chunk crash loop from resetting the delay every cycle.
+      if (this.healthyResetTimer) clearTimeout(this.healthyResetTimer);
+      const generation = this.joinGeneration;
+      this.healthyResetTimer = setTimeout(() => {
+        if (this.joinGeneration !== generation) return;
+        if (this.phase !== "in_game") return;
+        if (this.reconnectDelayMs !== this.config.reconnectMs) {
+          this.reconnectDelayMs = this.config.reconnectMs;
+          log.info(
+            `Connection stable ${Math.round(HEALTHY_STABLE_MS / 1000)}s on main world — reconnect backoff reset`,
+          );
+        }
+      }, HEALTHY_STABLE_MS);
       return;
     }
 
@@ -587,18 +799,67 @@ export class FractalBot extends EventEmitter {
     this.emit("status", this.getStatus());
   }
 
-  private scheduleReconnect(reason: string): void {
-    if (this.leaving || !this.autoReconnect) {
+  private hostList(): string[] {
+    const list = (this.config.hosts && this.config.hosts.length
+      ? this.config.hosts
+      : [this.config.host]
+    ).filter(Boolean);
+    return list.length ? list : ["alt3.6b6t.org"];
+  }
+
+  private currentHost(): string {
+    const list = this.hostList();
+    return list[this.hostIndex % list.length];
+  }
+
+  private rotateHost(reason: string): void {
+    const list = this.hostList();
+    if (list.length < 2) return;
+    this.hostIndex = (this.hostIndex + 1) % list.length;
+    const next = list[this.hostIndex];
+    this.config = { ...this.config, host: next };
+    log.info(`Host failover (${reason}) → ${next} [${this.hostIndex + 1}/${list.length}]`);
+  }
+
+  private scheduleReconnect(reason: string, kind: "captcha" | "rate-limit" | "other" = "other"): void {
+    if (this.leaving || !this.autoReconnect || this.captchaHalted) {
       this.setPhase("disconnected");
       return;
     }
     if (this.reconnectTimer) return;
+
+    if (kind === "captcha") {
+      if (this.config.captchaCooldownMs <= 0) {
+        this.captchaHalted = true;
+        this.setPhase("disconnected");
+        log.warn(
+          "Captcha kick — auto-reconnect disabled (CAPTCHA_COOLDOWN_MS=0). Solve the captcha with a real client, then restart the bot.",
+        );
+        return;
+      }
+      this.reconnectDelayMs = Math.max(this.reconnectDelayMs, this.config.captchaCooldownMs);
+    } else if (kind === "rate-limit") {
+      this.reconnectDelayMs = Math.max(this.reconnectDelayMs, this.config.rateLimitCooldownMs);
+    } else {
+      this.reconnectDelayMs = Math.min(
+        Math.max(this.reconnectDelayMs, this.config.reconnectMs) * 2,
+        this.config.reconnectMaxMs,
+      );
+    }
+
+    const jitter = 0.9 + Math.random() * 0.2;
+    const delay = Math.round(this.reconnectDelayMs * jitter);
+
     this.setPhase("reconnecting");
-    const delay = this.config.reconnectMs;
-    log.info(`Rejoining in ${Math.round(delay / 1000)}s after ${reason}`);
+    const human =
+      kind === "captcha"
+        ? `${Math.round(delay / 60000)} min (captcha cooldown)`
+        : `${Math.round(delay / 1000)}s`;
+    log.info(`Rejoining in ${human} after ${reason} (${kind}) via ${this.currentHost()}`);
+
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this.leaving || !this.autoReconnect) return;
+      if (this.leaving || !this.autoReconnect || this.captchaHalted) return;
       this.connect();
     }, delay);
   }
@@ -607,6 +868,10 @@ export class FractalBot extends EventEmitter {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.healthyResetTimer) {
+      clearTimeout(this.healthyResetTimer);
+      this.healthyResetTimer = null;
     }
   }
 

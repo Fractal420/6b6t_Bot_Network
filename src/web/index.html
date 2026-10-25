@@ -4,7 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
+    <meta name="theme-color" content="#e0b043" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>Fractal console</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
@@ -22,14 +27,59 @@
         <p id="ident-host">not connected</p>
       </div>
       <div class="phase-wrap">
-        <span class="phase" id="phase">idle</span>
+        <span class="phase pill" id="phase" data-tone="neutral">idle</span>
         <span class="link" id="ws-state">socket cold</span>
       </div>
     </header>
 
+    <nav class="jump-bar" aria-label="Sections">
+      <a href="#fleet-panel">Fleet</a>
+      <a href="#vitals-panel">Vitals</a>
+      <a href="#mapping-panel">Mapping</a>
+      <a href="#wire-panel">Wire</a>
+      <a href="#settings-panel">Settings</a>
+      <a href="#survey">Survey</a>
+      <a href="#activity-panel">Activity</a>
+    </nav>
+
+    <section id="alerts-bar" class="alerts-bar" hidden></section>
+
+    <section id="ops-strip" class="ops-strip" aria-live="polite">
+      <span id="ops-summary">fleet cold · no status yet</span>
+    </section>
+
     <main class="board">
-      <section class="panel vitals">
-        <h2>Vitals</h2>
+      <section class="panel fleet" id="fleet-panel">
+        <div class="fleet-head">
+          <h2>Fleet</h2>
+          <div class="fleet-tools">
+            <button type="button" id="fleet-start-all">start all</button>
+            <button type="button" id="fleet-stop-all" class="danger">stop all</button>
+            <button type="button" id="fleet-refresh">refresh</button>
+          </div>
+        </div>
+        <p class="hint" id="fleet-path">accounts.json</p>
+        <div id="fleet-grid" class="fleet-grid"></div>
+        <form id="fleet-add" class="fleet-add">
+          <input name="label" placeholder="label (optional)" />
+          <input name="username" placeholder="username" required />
+          <input name="password" type="password" placeholder="password" />
+          <label class="feat"><input type="checkbox" name="online" checked /> online</label>
+          <label class="feat"><input type="checkbox" name="announcements" /> announce</label>
+          <label class="feat"><input type="checkbox" name="antiAfk" /> anti-AFK</label>
+          <label class="feat"><input type="checkbox" name="hunt" /> hunt</label>
+          <label class="feat"><input type="checkbox" name="map" /> map</label>
+          <button type="submit">add account</button>
+        </form>
+        <details class="announce-edit">
+          <summary>Default announcements (global)</summary>
+          <textarea id="announce-json" rows="4" placeholder='[{"message":"Hello","intervalMs":300000}]'></textarea>
+          <button type="button" id="announce-save">save announcements</button>
+        </details>
+      </section>
+
+      <section class="panel vitals" id="vitals-panel">
+        <h2>Vitals <span class="hint" id="active-bot-label">(selected bot)</span></h2>
         <dl class="meta">
           <div><dt>world</dt><dd id="world">—</dd></div>
           <div><dt>dimension</dt><dd id="dimension">—</dd></div>
@@ -47,6 +97,7 @@
         <p class="flags">
           <button type="button" class="chip" id="toggle-reconnect" data-flag="autoReconnect">reconnect</button>
           <button type="button" class="chip" id="toggle-lobby" data-flag="autoLobby">auto lobby</button>
+          <button type="button" class="chip" id="toggle-notify" title="Browser / mobile notifications for captcha">notify off</button>
           <span class="chip ghost" id="hunt-state">hunt off</span>
         </p>
         <div class="actions">
@@ -55,11 +106,41 @@
           <button type="button" data-rpc="leave" class="danger">leave</button>
           <button type="button" data-rpc="hunt">hunt portals</button>
           <button type="button" data-rpc="stop">stop</button>
+          <button type="button" data-rpc="mapStart">map start</button>
+          <button type="button" data-rpc="mapStop">map stop</button>
         </div>
         <p class="fault" id="fault" hidden></p>
+        <div class="captcha-banner" id="captcha-banner" hidden>
+          <div class="captcha-head">
+            <strong>Anti-bot / captcha</strong>
+            <button type="button" class="captcha-dismiss" id="captcha-dismiss" title="Dismiss">×</button>
+          </div>
+          <p class="captcha-reason" id="captcha-reason"></p>
+          <p class="captcha-code" id="captcha-code" hidden></p>
+          <div class="captcha-links" id="captcha-links"></div>
+          <p class="captcha-hint">
+            Open a link below (enter the code if shown), or log in with a normal Minecraft client, then press
+            <em>rejoin</em>.
+          </p>
+        </div>
       </section>
 
-      <section class="panel chat">
+      <section class="panel jobs" id="mapping-panel">
+        <h2>Elytra mapping</h2>
+        <div class="job-card" id="mapping-card">
+          <p class="job-line"><span class="pill" id="map-active-pill" data-tone="neutral">idle</span>
+            <span id="map-mode-label">mode —</span></p>
+          <p class="job-line" id="map-progress">covered — / —</p>
+          <p class="job-line mute" id="map-output">output —</p>
+          <p class="job-line warn" id="map-stall" hidden>⚠ mapping stall — no progress recently</p>
+          <div class="job-actions">
+            <button type="button" data-rpc="mapStart">map start</button>
+            <button type="button" data-rpc="mapStop">map stop</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel chat" id="wire-panel">
         <h2>Wire</h2>
         <ol id="log" class="log"></ol>
         <form id="say" class="say">
@@ -118,6 +199,19 @@
         </form>
       </section>
 
+      <section class="panel settings" id="settings-panel">
+        <div class="settings-head">
+          <h2>Settings (.env)</h2>
+          <p class="hint" id="settings-path">load to edit all env values</p>
+        </div>
+        <form id="settings-form" class="settings-form"></form>
+        <p class="settings-msg" id="settings-msg" hidden></p>
+        <div class="settings-actions">
+          <button type="button" id="settings-reload">reload</button>
+          <button type="button" id="settings-save" class="primary">save to .env</button>
+        </div>
+      </section>
+
       <section class="panel survey" id="survey">
         <div class="survey-head">
           <div>
@@ -139,6 +233,11 @@
           <p class="survey-hud" id="survey-hud">aim into the void</p>
           <p class="survey-compass" id="survey-compass">N</p>
         </div>
+      </section>
+
+      <section class="panel activity" id="activity-panel">
+        <h2>Activity</h2>
+        <ol id="activity-log" class="activity-log"></ol>
       </section>
     </main>
     <script src="/survey.js"></script>

@@ -32,9 +32,25 @@ export function startRepl(bot: FractalBot): Promise<void> {
     console.log(chalk.magenta(`phase → ${phase}`));
     prompt();
   });
-  bot.on("kicked", (reason) => {
+  bot.on("kicked", (info) => {
     readline.cursorTo(process.stdout, 0);
-    console.log(chalk.red(`kicked: ${stripCtl(String(reason))}`));
+    const reason = typeof info === "string" ? info : info.reason;
+    const kind = typeof info === "object" && info.kind ? info.kind : "other";
+    const links = typeof info === "object" && Array.isArray(info.links) ? info.links : [];
+    console.log(chalk.red(`kicked (${kind}): ${stripCtl(String(reason))}`));
+    if (links.length > 0) {
+      console.log(chalk.yellow("CAPTCHA / verification link(s):"));
+      for (const link of links) {
+        console.log(chalk.cyan(`  ${link}`));
+      }
+      console.log(chalk.yellow("Open the link (or log in with a normal client) to solve it, then restart the bot."));
+    } else if (kind === "captcha") {
+      console.log(
+        chalk.yellow(
+          "Anti-bot captcha detected (no URL in message). Log in with a normal Minecraft client to verify, then restart.",
+        ),
+      );
+    }
     prompt();
   });
 

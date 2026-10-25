@@ -7,6 +7,7 @@ import type { FractalBot } from "./FractalBot.ts";
 import type { ControlRequest, ControlResponse, JoinOptions } from "./types.ts";
 import { apiCatalog } from "./catalog.ts";
 import { log } from "../logger.ts";
+import type { FleetManager } from "../fleet/FleetManager.ts";
 import {
   MAX_BODY_BYTES,
   authorized,
@@ -24,6 +25,8 @@ const DASHBOARD: Record<string, { file: string; type: string }> = {
   "/app.css": { file: "app.css", type: "text/css; charset=utf-8" },
   "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
   "/survey.js": { file: "survey.js", type: "text/javascript; charset=utf-8" },
+  "/sw.js": { file: "sw.js", type: "text/javascript; charset=utf-8" },
+  "/manifest.webmanifest": { file: "manifest.webmanifest", type: "application/manifest+json; charset=utf-8" },
 };
 
 export interface ControlServer {
@@ -32,7 +35,7 @@ export interface ControlServer {
 }
 
 export function startControlServer(
-  bot: FractalBot,
+  fleet: FleetManager,
   host: string,
   port: number,
   token: string,
@@ -62,43 +65,51 @@ export function startControlServer(
     }
 
     if (req.method === "GET" && url.pathname === "/v1/status") {
-      return json(res, { ok: true, data: bot.getStatus() });
+      const primary = fleet.resolveBot(null);
+      return json(res, {
+        ok: true,
+        data: primary ? primary.getStatus() : { phase: "idle", connected: false, fleet: fleet.getFleetStatus() },
+      });
     }
+    if (req.method === "GET" && url.pathname === "/v1/fleet") {
+      return json(res, { ok: true, data: fleet.getFleetStatus() });
+    }
+    const getBot = () => fleet.resolveBot(url.searchParams.get("botId"));
     if (req.method === "GET" && url.pathname === "/v1/players") {
-      return json(res, wrap(() => bot.getPlayers()));
+      return json(res, wrap(() => getBot()!.getPlayers()));
     }
     if (req.method === "GET" && url.pathname === "/v1/inventory") {
-      return json(res, wrap(() => bot.getInventory()));
+      return json(res, wrap(() => getBot()!.getInventory()));
     }
     if (req.method === "GET" && url.pathname === "/v1/dump") {
-      return json(res, wrap(() => bot.dump()));
+      return json(res, wrap(() => getBot()!.dump()));
     }
     if (req.method === "GET" && url.pathname === "/v1/voxels") {
-      return json(res, wrap(() => bot.getVoxels(Number(url.searchParams.get("r") ?? "20"))));
+      return json(res, wrap(() => getBot()!.getVoxels(Number(url.searchParams.get("r") ?? "20"))));
     }
     if (req.method === "GET" && url.pathname === "/v1/view") {
       return json(
         res,
         wrap(() =>
-          bot.getView(Number(url.searchParams.get("r") ?? "20"), truthy(url.searchParams.get("map"))),
+          getBot()!.getView(Number(url.searchParams.get("r") ?? "20"), truthy(url.searchParams.get("map"))),
         ),
       );
     }
     if (req.method === "GET" && url.pathname === "/v1/map") {
-      return json(res, wrap(() => bot.getMap(Number(url.searchParams.get("r") ?? "24"))));
+      return json(res, wrap(() => getBot()!.getMap(Number(url.searchParams.get("r") ?? "24"))));
     }
     if (req.method === "GET" && url.pathname === "/v1/block") {
       const x = Number(url.searchParams.get("x"));
       const y = Number(url.searchParams.get("y"));
       const z = Number(url.searchParams.get("z"));
       if (![x, y, z].every(Number.isFinite)) return json(res, { ok: false, error: "block needs x y z" }, 400);
-      return json(res, wrap(() => bot.getBlock(x, y, z)));
+      return json(res, wrap(() => getBot()!.getBlock(x, y, z)));
     }
     if (req.method === "GET" && url.pathname === "/v1/cursor") {
-      return json(res, wrap(() => bot.getLook()));
+      return json(res, wrap(() => getBot()!.getLook()));
     }
     if (req.method === "GET" && url.pathname === "/v1/entities") {
-      return json(res, wrap(() => bot.getEntities()));
+      return json(res, wrap(() => getBot()!.getEntities()));
     }
 
     if (req.method !== "POST") {
@@ -126,13 +137,13 @@ export function startControlServer(
     }
 
     if (url.pathname === "/v1/rpc") {
-      const result = await dispatch(bot, payload);
+      const result = await dispatch(fleet, payload);
       return json(res, result, result.ok ? 200 : 400);
     }
 
     const action = url.pathname.replace(/^\/v1\//, "") as ControlRequest["action"];
     const merged = { ...(payload ?? {}), action } as ControlRequest;
-    const result = await dispatch(bot, merged);
+    const result = await dispatch(fleet, merged);
     return json(res, result, result.ok ? 200 : 400);
   });
 
@@ -143,7 +154,9 @@ export function startControlServer(
       return;
     }
     sockets.add(socket);
-    socket.send(JSON.stringify({ event: "status", data: bot.getStatus() }));
+    const primary = fleet.resolveBot(null);
+    socket.send(JSON.stringify({ event: "fleet", data: fleet.getFleetStatus() }));
+    if (primary) socket.send(JSON.stringify({ event: "status", data: primary.getStatus() }));
     socket.on("close", () => sockets.delete(socket));
   });
 
@@ -154,41 +167,28 @@ export function startControlServer(
     }
   };
 
-  const events = [
-    "phase",
-    "connecting",
-    "connected",
-    "spawned",
-    "authenticated",
-    "chat",
-    "kicked",
-    "disconnected",
-    "error",
-    "status",
-    "portalFound",
-    "portalEntered",
-    "lobbyRetry",
-    "worldKind",
-  ] as const;
-
-  for (const event of events) {
-    bot.on(event, ((data: unknown) => {
-      if (event === "error") {
-        const err = data as Error;
-        forward(event, {
-          message: err.message,
-          lastError: bot.getStatus().lastError,
-        });
-        return;
-      }
-      if (event === "spawned") {
-        const dump = data as { asciiMap?: string };
-        forward(event, { ...dump, asciiMap: dump.asciiMap });
-        return;
-      }
-      forward(event, data);
-    }) as never);
-  }
+  fleet.on("fleet", (data) => forward("fleet", data));
+  fleet.on("botEvent", (payload: { id: string; event: string; args: unknown[] }) => {
+    const data = payload.args[0];
+    if (payload.event === "error") {
+      const err = data as Error;
+      forward(payload.event, {
+        botId: payload.id,
+        message: err?.message,
+      });
+      return;
+    }
+    if (payload.event === "kicked" && data && typeof data === "object") {
+      forward("kicked", { botId: payload.id, ...(data as object) });
+      return;
+    }
+    if (payload.event === "status") {
+      forward("status", data);
+      forward("fleet", fleet.getFleetStatus());
+      return;
+    }
+    forward(payload.event, data);
+  });
 
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -249,9 +249,62 @@ function truthy(value: string | null): boolean {
   return value === "1" || value === "true" || value === "yes";
 }
 
-async function dispatch(bot: FractalBot, request?: ControlRequest): Promise<ControlResponse> {
+async function dispatch(fleet: FleetManager, request?: ControlRequest): Promise<ControlResponse> {
   if (!request?.action) return { ok: false, error: "missing action" };
   try {
+    // Fleet management
+    if (request.action === "fleetStatus") {
+      return { ok: true, data: fleet.getFleetStatus() };
+    }
+    if (request.action === "fleetAccounts") {
+      return { ok: true, data: { accounts: fleet.listAccounts(), path: fleet.getFleetStatus().accountsPath } };
+    }
+    if (request.action === "fleetAddAccount") {
+      const acc = fleet.addOrUpdateAccount(request.account);
+      return { ok: true, data: acc };
+    }
+    if (request.action === "fleetRemoveAccount") {
+      fleet.deleteAccount(request.id);
+      return { ok: true, data: fleet.getFleetStatus() };
+    }
+    if (request.action === "fleetStart") {
+      const msg = await fleet.startBot(request.id);
+      return { ok: true, data: { result: msg, fleet: fleet.getFleetStatus() } };
+    }
+    if (request.action === "fleetStop") {
+      const msg = await fleet.stopBot(request.id);
+      return { ok: true, data: { result: msg, fleet: fleet.getFleetStatus() } };
+    }
+    if (request.action === "fleetStartAll") {
+      const results = await fleet.startAllEnabled();
+      return { ok: true, data: { results, fleet: fleet.getFleetStatus() } };
+    }
+    if (request.action === "fleetStopAll") {
+      await fleet.stopAll();
+      return { ok: true, data: fleet.getFleetStatus() };
+    }
+    if (request.action === "fleetSetTask") {
+      const msg = await fleet.setTask(request.id, request.task, request.taskOptions);
+      return { ok: true, data: { result: msg, fleet: fleet.getFleetStatus() } };
+    }
+    if (request.action === "fleetSetFeatures") {
+      const msg = await fleet.setFeatures(request.id, request.features || {});
+      return { ok: true, data: { result: msg, fleet: fleet.getFleetStatus() } };
+    }
+    if (request.action === "fleetSetAnnouncements") {
+      fleet.setDefaultAnnouncements(request.announcements || []);
+      return { ok: true, data: { defaultAnnouncements: fleet.getDefaultAnnouncements() } };
+    }
+
+    const botId = (request as { botId?: string }).botId || fleet.defaultBotId();
+    const bot = fleet.resolveBot(botId);
+    if (!bot) {
+      return {
+        ok: false,
+        error: "No bot running. Add an account and fleetStart it, or fleetStartAll.",
+      };
+    }
+
     switch (request.action) {
       case "join":
         await bot.join(safeJoinOptions(request.options));
@@ -345,6 +398,42 @@ async function dispatch(bot: FractalBot, request?: ControlRequest): Promise<Cont
       case "unhunt":
         bot.stopPortalHunt();
         return { ok: true, data: bot.getStatus() };
+      case "mapStart": {
+        const result = bot.startMapping(request.mode);
+        return { ok: true, data: { result, status: bot.getMappingStatus() } };
+      }
+      case "mapStop": {
+        const result = bot.stopMapping();
+        return { ok: true, data: { result, status: bot.getMappingStatus() } };
+      }
+      case "mapStatus":
+        return { ok: true, data: bot.getMappingStatus() };
+      case "mapConfig":
+        if (request.mapping) bot.setMappingConfig(request.mapping);
+        return { ok: true, data: bot.getMappingStatus() };
+      case "getSettings": {
+        const { getSettingsSnapshot } = await import("../config.ts");
+        return { ok: true, data: getSettingsSnapshot() };
+      }
+      case "saveSettings": {
+        const { saveSettingsValues, reloadConfigFromEnv, getSettingsSnapshot, SETTINGS_FIELDS } = await import(
+          "../config.ts"
+        );
+        const values = (request as { values?: Record<string, string> }).values || {};
+        const result = saveSettingsValues(values);
+        const next = reloadConfigFromEnv();
+        fleet.applyBaseConfig(next);
+        const restartKeys = SETTINGS_FIELDS.filter((f) => f.restart && result.saved.includes(f.key)).map((f) => f.key);
+        return {
+          ok: true,
+          data: {
+            ...result,
+            restartRequired: restartKeys.length > 0,
+            restartKeys,
+            settings: getSettingsSnapshot(),
+          },
+        };
+      }
       case "set":
         bot.setFlags({ autoReconnect: request.autoReconnect, autoLobby: request.autoLobby });
         return { ok: true, data: bot.getStatus() };

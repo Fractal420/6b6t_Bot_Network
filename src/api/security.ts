@@ -6,7 +6,7 @@ import { log } from "../logger.ts";
 
 export const MAX_BODY_BYTES = 256 * 1024;
 export const MAX_CHAT_CHARS = 256;
-export const COOKIE_NAME = "fractal_token";
+export const COOKIE_NAME = "control_token";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"]);
 
@@ -22,14 +22,14 @@ export function isLoopbackAddress(addr?: string | null): boolean {
 }
 
 export function assertSafeControlBind(config: FractalConfig): void {
-  const expose = process.env.FRACTAL_CONTROL_EXPOSE === "1";
+  const expose = process.env.CONTROL_EXPOSE === "1";
   if (isLoopbackHost(config.controlHost)) return;
   if (expose) {
-    log.warn(`Control API is exposed on ${config.controlHost} (FRACTAL_CONTROL_EXPOSE=1)`);
+    log.warn(`Control API is exposed on ${config.controlHost} (CONTROL_EXPOSE=1)`);
     return;
   }
   throw new Error(
-    `Refusing to bind the control API on ${config.controlHost}. Keep FRACTAL_CONTROL_HOST=127.0.0.1, or set FRACTAL_CONTROL_EXPOSE=1 if you really mean it.`,
+    `Refusing to bind the control API on ${config.controlHost}. Keep CONTROL_HOST=127.0.0.1, or set CONTROL_EXPOSE=1 if you really mean it.`,
   );
 }
 
@@ -37,8 +37,8 @@ export function ensureControlToken(config: FractalConfig): string {
   const existing = config.controlToken.trim();
   if (existing.length >= 16) return existing;
   const token = randomBytes(32).toString("hex");
-  upsertEnvVar("FRACTAL_CONTROL_TOKEN", token);
-  log.info("Generated FRACTAL_CONTROL_TOKEN and wrote it to .env (loopback API now requires this token)");
+  upsertEnvVar("CONTROL_TOKEN", token);
+  log.info("Generated CONTROL_TOKEN and wrote it to .env (loopback API now requires this token)");
   return token;
 }
 
@@ -100,13 +100,13 @@ function originAllowed(origin: string, port: number): boolean {
 
 export function clientAllowed(req: http.IncomingMessage, port: number): boolean {
   const remote = req.socket.remoteAddress;
-  if (!isLoopbackAddress(remote) && process.env.FRACTAL_CONTROL_EXPOSE !== "1") {
+  if (!isLoopbackAddress(remote) && process.env.CONTROL_EXPOSE !== "1") {
     return false;
   }
 
   const host = hostName(headerString(req.headers.host));
   if (!host || !isLoopbackHost(host)) {
-    if (process.env.FRACTAL_CONTROL_EXPOSE === "1") return true;
+    if (process.env.CONTROL_EXPOSE === "1") return true;
     return false;
   }
 

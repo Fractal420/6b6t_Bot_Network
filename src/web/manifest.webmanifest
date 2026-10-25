@@ -1,0 +1,10 @@
+{
+  "name": "Fractal console",
+  "short_name": "Fractal",
+  "description": "6b6t Fractal bot control dashboard",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#100c09",
+  "theme_color": "#e0b043",
+  "lang": "en"
+}

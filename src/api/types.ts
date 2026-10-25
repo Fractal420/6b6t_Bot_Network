@@ -10,7 +10,7 @@ export type BotPhase =
   | "reconnecting"
   | "disconnected";
 
-export type WorldKind = "unknown" | "auth" | "lobby" | "overworld" | "nether" | "end";
+export type WorldKind = "unknown" | "auth" | "lobby" | "backup" | "overworld" | "nether" | "end";
 
 export type PortalKind = "server" | "nether" | "end" | "unknown";
 
@@ -103,11 +103,30 @@ export interface BotStatus {
   players: number;
   uptimeMs: number;
   lastKick?: string;
+  lastKickKind?:
+    | "captcha"
+    | "rate-limit"
+    | "verification-expired"
+    | "premium-name"
+    | "account-limit"
+    | "wrong-password"
+    | "version-mismatch"
+    | "ddos-blocked"
+    | "too-fast"
+    | "already-online"
+    | "backend-unreachable"
+    | "connection-error"
+    | "other";
+  lastKickHint?: string;
+  lastKickLinks?: string[];
+  lastVerificationCode?: string;
   lastError: BotErrorInfo | null;
   lastChat?: string;
   autoReconnect: boolean;
   autoLobby: boolean;
   huntingPortal: boolean;
+  /** Elytra mapper snapshot. */
+  mapping?: unknown;
 }
 
 export type BotErrorSource = "connect" | "kick" | "disconnect" | "socket";
@@ -229,7 +248,13 @@ export interface FractalBotEvents {
   spawned: (dump: WorldDump) => void;
   authenticated: () => void;
   chat: (event: ChatEvent) => void;
-  kicked: (reason: string) => void;
+  /** Fired on every kick. Includes classification and any extracted captcha / verification links. */
+  kicked: (info: {
+    reason: string;
+    kind: string;
+    links: string[];
+    verificationCode?: string;
+  }) => void;
   disconnected: (reason?: string) => void;
   error: (error: Error) => void;
   status: (status: BotStatus) => void;
@@ -272,8 +297,69 @@ export type ControlRequest =
   | { action: "cursor" }
   | { action: "hunt" }
   | { action: "unhunt" }
+  | { action: "mapStart"; mode?: string }
+  | { action: "mapStop" }
+  | { action: "mapStatus" }
+  | { action: "mapConfig"; mapping?: Record<string, unknown> }
+  | { action: "getSettings" }
+  | { action: "saveSettings"; values: Record<string, string> }
+  | { action: "fleetStatus" }
+  | { action: "fleetAccounts" }
+  | {
+      action: "fleetAddAccount";
+      account: {
+        id?: string;
+        username: string;
+        password?: string;
+        auth?: "offline" | "microsoft";
+        host?: string;
+        port?: number;
+        label?: string;
+        enabled?: boolean;
+        task?: "idle" | "join" | "hunt" | "map" | "leave";
+        taskOptions?: { mapMode?: string };
+        features?: {
+          online?: boolean;
+          hunt?: boolean;
+          map?: boolean;
+          mapMode?: string;
+          announcements?: boolean;
+          antiAfk?: boolean;
+        };
+      };
+    }
+  | { action: "fleetRemoveAccount"; id: string }
+  | { action: "fleetStart"; id: string }
+  | { action: "fleetStop"; id: string }
+  | { action: "fleetStartAll" }
+  | { action: "fleetStopAll" }
+  | {
+      action: "fleetSetTask";
+      id: string;
+      task: "idle" | "join" | "hunt" | "map" | "leave";
+      taskOptions?: { mapMode?: string };
+    }
+  | {
+      action: "fleetSetFeatures";
+      id: string;
+      features: {
+        online?: boolean;
+        hunt?: boolean;
+        map?: boolean;
+        mapMode?: string;
+                announcements?: boolean;
+        antiAfk?: boolean;
+      };
+    }
+  | {
+      action: "fleetSetAnnouncements";
+      announcements: { message: string; intervalMs: number }[];
+    }
   | { action: "set"; autoReconnect?: boolean; autoLobby?: boolean }
   | { action: "catalog" };
+
+/** Optional target bot for single-bot RPC when fleet has many accounts */
+export type ControlRequestWithBot = ControlRequest & { botId?: string };
 
 export interface ControlResponse {
   ok: boolean;

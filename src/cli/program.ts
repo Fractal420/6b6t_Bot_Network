@@ -28,7 +28,7 @@ export async function runCli(argv = process.argv): Promise<void> {
 
   program
     .command("join")
-    .description("Join 6b6t with the stored offline account (FRACTAL_USERNAME / FRACTAL_PASSWORD)")
+    .description("Join 6b6t with the stored offline account (MC_USERNAME / MC_PASSWORD)")
     .option("--host <host>", "server host")
     .option("--port <port>", "server port")
     .option("-u, --username <name>", "offline username")
@@ -253,6 +253,34 @@ export async function runCli(argv = process.argv): Promise<void> {
     });
 
   program
+    .command("map-start")
+    .description("Start elytra terrain mapping (Xaero regions). Mode: box, spawn, ring, north, ...")
+    .argument("[mode]", "mapping mode", "box")
+    .action(async (mode: string) => {
+      await proxyOrFail(loadConfig(), { action: "mapStart", mode });
+    });
+
+  program
+    .command("map-stop")
+    .description("Stop elytra terrain mapping")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "mapStop" });
+    });
+
+  program
+    .command("map-status")
+    .description("Show elytra mapper status and output paths")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "mapStatus" });
+    });
+
+  program
+
+  program
+
+  program
+
+  program
     .command("shell")
     .description("Open an interactive control shell (starts the API if needed)")
     .action(async () => {
@@ -306,13 +334,40 @@ async function runSession(
     return;
   }
 
-  const bot = new FractalBot(config);
-  wireLogs(bot);
+  const { FleetManager } = await import("../fleet/FleetManager.ts");
+  const fleet = new FleetManager(config);
   const hardened = hardenControlConfig(config);
-  const server = await startControlServer(bot, hardened.controlHost, hardened.controlPort, hardened.controlToken);
+  const server = await startControlServer(fleet, hardened.controlHost, hardened.controlPort, hardened.controlToken);
+
+  let discord: { start: () => void; stop: () => void; log: (t: string) => void } | null = null;
+  if (config.discordEnabled) {
+    if (!config.discordToken || !config.discordChannelId) {
+      log.warn("DISCORD_ENABLED=1 but DISCORD_TOKEN or DISCORD_CHANNEL_ID is missing — Discord control skipped");
+    } else {
+      try {
+        const { createDiscordControl } = await import("../discord/control.ts");
+        // Discord binds to primary bot when available; fleet commands use web/RPC
+        const primary = fleet.resolveBot(null) || new (await import("../api/FractalBot.ts")).FractalBot(config);
+        discord = createDiscordControl(primary, {
+          token: config.discordToken,
+          channelId: config.discordChannelId,
+          mirrorLogs: config.discordMirrorLogs,
+        });
+        discord.start();
+        log.info("Discord remote control starting…");
+      } catch (err) {
+        log.error("Discord control failed to start", err instanceof Error ? err.message : err);
+      }
+    }
+  }
 
   const shutdown = async () => {
-    await bot.leave("shutdown");
+    try {
+      discord?.stop();
+    } catch {
+      /* ignore */
+    }
+    await fleet.stopAll();
     await server.close();
     process.exit(0);
   };
@@ -330,17 +385,19 @@ async function runSession(
   });
 
   if (options.joinNow !== false) {
-    await bot.join({ autoLobby: options.autoLobby, autoReconnect: options.autoReconnect });
-  } else {
-    bot.setFlags({ autoLobby: options.autoLobby, autoReconnect: options.autoReconnect });
+    const results = await fleet.startAllEnabled();
+    for (const r of results) log.info(r);
   }
 
   if (options.daemon) {
-    log.info(`Dashboard at ${server.url}  ·  CLI: fractalbot status / fractalbot chat`);
+    log.info(`Dashboard at ${server.url}  ·  Fleet accounts: ${fleet.listAccounts().length}`);
+    log.info(`CLI: fractalbot status · Web: Fleet panel to add bots & assign tasks`);
     return;
   }
 
-  await startRepl(bot);
+  const bot = fleet.resolveBot(null);
+  if (bot) await startRepl(bot);
+  else log.warn("No bot running — add accounts in the web Fleet panel or accounts.json");
   await shutdown();
 }
 
@@ -404,7 +461,13 @@ function printResult(result: { ok: boolean; error?: string; data?: unknown }): v
 
 function wireLogs(bot: FractalBot): void {
   bot.on("chat", (event) => log.info(`chat ${redactSecrets(stripCtl(event.raw))}`));
-  bot.on("kicked", (reason) => log.warn(`kicked ${reason}`));
+  bot.on("kicked", (info) => {
+    const reason = typeof info === "string" ? info : info.reason;
+    const kind = typeof info === "object" && info.kind ? info.kind : "other";
+    const links = typeof info === "object" && Array.isArray(info.links) ? info.links : [];
+    log.warn(`kicked (${kind}) ${reason}`);
+    for (const link of links) log.warn(`captcha link: ${link}`);
+  });
   bot.on("portalFound", (portal) =>
     log.info(`portal ${portal.kind} ${portal.blockName} @ ${portal.position.x},${portal.position.y},${portal.position.z}`),
   );
