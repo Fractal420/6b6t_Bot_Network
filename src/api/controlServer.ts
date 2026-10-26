@@ -28,6 +28,10 @@ const DASHBOARD: Record<string, { file: string; type: string }> = {
   "/survey.js": { file: "survey.js", type: "text/javascript; charset=utf-8" },
   "/sw.js": { file: "sw.js", type: "text/javascript; charset=utf-8" },
   "/manifest.webmanifest": { file: "manifest.webmanifest", type: "application/manifest+json; charset=utf-8" },
+  "/brand-banner.png": { file: "brand-banner.png", type: "image/png" },
+  "/brand-banner-full.png": { file: "brand-banner-full.png", type: "image/png" },
+  "/logo-icon.png": { file: "logo-icon.png", type: "image/png" },
+  "/logo.jpg": { file: "logo.jpg", type: "image/jpeg" },
 };
 
 export interface ControlServer {

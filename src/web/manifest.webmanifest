@@ -1,10 +1,24 @@
 {
-  "name": "Fractal console",
-  "short_name": "Fractal",
-  "description": "6b6t Fractal bot control dashboard",
+  "name": "Fractal420's Bot Network",
+  "short_name": "Fractal420",
+  "description": "6b6t Fractal bot control dashboard — cyberpunk neon theme",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#100c09",
-  "theme_color": "#e0b043",
-  "lang": "en"
+  "background_color": "#050508",
+  "theme_color": "#7B2CBF",
+  "lang": "en",
+  "icons": [
+    {
+      "src": "/logo-icon.png",
+      "sizes": "128x128",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/logo.jpg",
+      "sizes": "1024x1024",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
 }

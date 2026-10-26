@@ -4,28 +4,54 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="referrer" content="no-referrer" />
-    <meta name="theme-color" content="#3b82f6" />
+    <meta name="theme-color" content="#7B2CBF" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <title>Fractal console</title>
+    <title>Fractal420's Bot Network</title>
+    <link rel="icon" type="image/png" href="/logo-icon.png" />
+    <link rel="icon" type="image/jpeg" href="/logo.jpg" />
+    <link rel="apple-touch-icon" href="/logo.jpg" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/app.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
   </head>
   <body>
     <div class="grain" aria-hidden="true"></div>
 
     <header class="top">
-      <div class="brand-row">
+      <div class="top-controls">
         <button type="button" id="nav-toggle" class="icon-btn" aria-label="Open modules" title="Modules">
           <span aria-hidden="true">☰</span>
         </button>
-        <div class="brand">
-          <span class="mark">◆</span>
-          <div>
-            <p class="kicker">6b6t live ops</p>
-            <h1>Fractal console</h1>
+        <div class="top-right">
+          <button type="button" id="nav-home" class="icon-btn" data-tab="play" aria-label="Home" title="Home">
+            <span aria-hidden="true">⌂</span>
+          </button>
+          <button type="button" id="nav-log" class="icon-btn" data-tab="log" aria-label="Activity log" title="Log">
+            <span aria-hidden="true">🪵</span>
+          </button>
+          <button type="button" id="nav-settings" class="icon-btn" data-tab="settings" aria-label="Settings" title="Settings">
+            <span aria-hidden="true">⚙</span>
+          </button>
+          <div class="phase-wrap">
+            <span class="phase pill" id="phase" data-tone="neutral">idle</span>
+            <span class="link" id="ws-state">socket cold</span>
           </div>
+        </div>
+      </div>
+
+      <div class="brand-strip">
+        <div class="brand">
+          <img
+            class="brand-banner"
+            src="/brand-banner.png"
+            alt="Fractal420's Bot Network"
+            width="720"
+            height="160"
+          />
         </div>
       </div>
 
@@ -52,22 +78,6 @@
           </div>
           <div id="pd-list" class="pd-list"></div>
           <div class="pd-empty" id="pd-empty" hidden>No profiles yet — open Manage to add one</div>
-        </div>
-      </div>
-
-      <div class="top-right">
-        <button type="button" id="nav-home" class="icon-btn" data-tab="play" aria-label="Home" title="Home">
-          <span aria-hidden="true">⌂</span>
-        </button>
-        <button type="button" id="nav-log" class="icon-btn" data-tab="log" aria-label="Activity log" title="Log">
-          <span aria-hidden="true">🪵</span>
-        </button>
-        <button type="button" id="nav-settings" class="icon-btn" data-tab="settings" aria-label="Settings" title="Settings">
-          <span aria-hidden="true">⚙</span>
-        </button>
-        <div class="phase-wrap">
-          <span class="phase pill" id="phase" data-tone="neutral">idle</span>
-          <span class="link" id="ws-state">socket cold</span>
         </div>
       </div>
     </header>
