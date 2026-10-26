@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "defaultAnnouncements": [
-    {
-      "message": "Fractal bot online.",
-      "intervalMs": 300000
-    }
-  ]
-}
