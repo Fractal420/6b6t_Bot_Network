@@ -56,6 +56,9 @@
       </div>
 
       <div class="top-right">
+        <button type="button" id="nav-home" class="icon-btn" data-tab="play" aria-label="Home" title="Home">
+          <span aria-hidden="true">⌂</span>
+        </button>
         <button type="button" id="nav-log" class="icon-btn" data-tab="log" aria-label="Activity log" title="Log">
           <span aria-hidden="true">🪵</span>
         </button>
@@ -88,7 +91,7 @@
           />
         </div>
         <nav class="side-nav" id="side-nav" role="navigation"></nav>
-        <p class="sidebar-foot hint">Settings &amp; Log are in the top bar</p>
+        <p class="sidebar-foot hint">Home, Settings &amp; Log are in the top bar</p>
       </aside>
 
       <div class="shell-main">
@@ -246,14 +249,9 @@
           <div class="mc-inv" id="inv">
             <div class="mc-inv-equip">
               <div class="mc-armor" id="inv-gear" title="Armor"></div>
-              <div class="mc-figure" aria-hidden="true">
-                <div class="mc-steve">
-                  <span class="mc-head"></span>
-                  <span class="mc-torso"></span>
-                  <span class="mc-arms"></span>
-                  <span class="mc-legs"></span>
-                </div>
-                <p class="mc-figure-label">equipment</p>
+              <div class="mc-figure">
+                <img id="inv-skin" class="mc-skin" alt="Player skin" width="64" height="128" decoding="async" />
+                <p class="mc-figure-label" id="inv-skin-name">skin</p>
               </div>
               <div class="mc-offhand-col">
                 <div class="mc-offhand" id="inv-offhand" title="Offhand"></div>
@@ -278,27 +276,17 @@
           </div>
         </div>
 
+        <div class="card-block survey-block" id="survey-slot-play">
+          <div class="survey-mount" id="survey-mount-play"></div>
+        </div>
+
         <div class="card-block">
-          <h3 class="subhead">Steer</h3>
-          <p class="hint">WASD move · space jump · shift sneak · R sprint</p>
-          <div class="pad" aria-hidden="true">
-            <b data-k="forward">W</b>
-            <div class="row">
-              <b data-k="left">A</b>
-              <b data-k="back">S</b>
-              <b data-k="right">D</b>
-            </div>
-          </div>
           <form id="goto" class="goto">
             <input name="x" placeholder="x" inputmode="decimal" />
             <input name="y" placeholder="y" inputmode="decimal" />
             <input name="z" placeholder="z" inputmode="decimal" />
             <button type="submit">goto</button>
           </form>
-        </div>
-
-        <div class="card-block survey-block" id="survey-slot-play">
-          <div class="survey-mount" id="survey-mount-play"></div>
         </div>
 
         <div class="card-block wire-block" data-wire-root="play">
@@ -376,16 +364,6 @@
         </div>
 
         <div class="card-block">
-          <h3 class="subhead">Steer</h3>
-          <p class="hint">WASD · space jump · shift sneak · R sprint</p>
-          <div class="pad" aria-hidden="true">
-            <b data-k="forward">W</b>
-            <div class="row">
-              <b data-k="left">A</b>
-              <b data-k="back">S</b>
-              <b data-k="right">D</b>
-            </div>
-          </div>
           <form id="goto-map" class="goto">
             <input name="x" placeholder="x" inputmode="decimal" />
             <input name="y" placeholder="y" inputmode="decimal" />
@@ -591,6 +569,12 @@
               </label>
 
               <p class="hint" style="margin-top:0.85rem">Push notifications (this browser / phone). Requires notification permission — same as captcha alerts.</p>
+              <label>Notify while in lobby / auth / queue
+                <select name="notifyInLobby">
+                  <option value="false">Off (ignore lobby)</option>
+                  <option value="true">On</option>
+                </select>
+              </label>
               <label>Notify: player entered range
                 <select name="notifyPlayerEnter">
                   <option value="true">On</option>
@@ -663,12 +647,12 @@
       </div><!-- .shell-main -->
     </div><!-- .app-shell -->
 
-    <!-- Shared 3D survey — moved between Play and Map -->
+    <!-- Shared 3D survey — moved between Play and Map; gamepad always sits under the stage -->
     <div id="survey-shared" class="survey-shared" hidden>
       <div class="survey-head">
         <div>
           <h3 class="subhead">3D view</h3>
-          <p class="hint" id="survey-hint">follow: WASD steers · orbit: click stage · esc</p>
+          <p class="hint" id="survey-hint">follow mode · gamepad below · orbit: drag stage</p>
         </div>
         <p class="survey-meta" id="survey-meta">no terrain yet</p>
         <div class="survey-tools">
@@ -684,6 +668,43 @@
         <div class="crosshair" aria-hidden="true"></div>
         <p class="survey-hud" id="survey-hud">aim into the void</p>
         <p class="survey-compass" id="survey-compass">N</p>
+      </div>
+
+      <div class="gamepad" id="gamepad" aria-label="On-screen gamepad">
+        <div class="gp-top">
+          <div class="gp-stick gp-move" aria-label="Move">
+            <span class="gp-label">Move</span>
+            <button type="button" class="gp-btn gp-dir gp-n" data-k="forward" aria-label="Forward">▲</button>
+            <button type="button" class="gp-btn gp-dir gp-w" data-k="left" aria-label="Left">◀</button>
+            <button type="button" class="gp-btn gp-dir gp-s" data-k="back" aria-label="Back">▼</button>
+            <button type="button" class="gp-btn gp-dir gp-e" data-k="right" aria-label="Right">▶</button>
+          </div>
+          <div class="gp-stick gp-look" aria-label="Look">
+            <span class="gp-label">Look</span>
+            <button type="button" class="gp-btn gp-dir gp-n" data-turn="0,-0.18" aria-label="Look up">▲</button>
+            <button type="button" class="gp-btn gp-dir gp-w" data-turn="-0.28,0" aria-label="Look left">◀</button>
+            <button type="button" class="gp-btn gp-dir gp-s" data-turn="0,0.18" aria-label="Look down">▼</button>
+            <button type="button" class="gp-btn gp-dir gp-e" data-turn="0.28,0" aria-label="Look right">▶</button>
+          </div>
+        </div>
+
+        <div class="gp-bottom">
+          <div class="gp-mods">
+            <button type="button" class="gp-btn gp-mod" data-k="sneak" aria-label="Sneak">Sneak</button>
+            <button type="button" class="gp-btn gp-mod" data-k="sprint" aria-label="Sprint">Sprint</button>
+            <button type="button" class="gp-btn gp-mod gp-jump" data-k="jump" aria-label="Jump">Jump</button>
+          </div>
+          <div class="gp-clicks">
+            <button type="button" class="gp-btn gp-click gp-lmb" data-click="left" aria-label="Left click — attack / dig">
+              <span class="gp-click-key">L</span>
+              <span class="gp-click-desc">Attack / Dig</span>
+            </button>
+            <button type="button" class="gp-btn gp-click gp-rmb" data-click="right" aria-label="Right click — use / place">
+              <span class="gp-click-key">R</span>
+              <span class="gp-click-desc">Use / Place</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PNG } from "pngjs";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { FractalBot } from "./FractalBot.ts";
 import type { ControlRequest, ControlResponse, JoinOptions } from "./types.ts";
@@ -52,6 +53,11 @@ export function startControlServer(
     if (req.method === "GET" && serveDashboard(url.pathname, res, token)) return;
     if (req.method === "GET" && url.pathname === "/health") {
       return json(res, { ok: true, data: { status: "up" } });
+    }
+    // Same-origin asset proxy — CSP blocks external img CDNs (Brave/shields)
+    if (req.method === "GET" && url.pathname.startsWith("/asset/")) {
+      await serveAssetProxy(url, res);
+      return;
     }
 
     if (!authorized(req, token)) {
@@ -555,4 +561,409 @@ function safeJoinOptions(options?: JoinOptions): JoinOptions {
     autoLobby: options?.autoLobby,
     autoReconnect: options?.autoReconnect,
   };
+}
+
+
+/** In-memory texture/skin cache (process lifetime). */
+const assetCache = new Map<string, { buf: Buffer; type: string; at: number }>();
+const ASSET_TTL_MS = 6 * 60 * 60 * 1000;
+const MC_ASSET_VER = "1.21.1";
+const MC_TEXTURE_BASES = [
+  `https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@${MC_ASSET_VER}/assets/minecraft/textures`,
+  `https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/${MC_ASSET_VER}/assets/minecraft/textures`,
+  `https://assets.mcasset.cloudflare.com/${MC_ASSET_VER}/assets/minecraft/textures`,
+];
+const MC_MODEL_BASES = [
+  `https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@${MC_ASSET_VER}/assets/minecraft/models/item`,
+  `https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/${MC_ASSET_VER}/assets/minecraft/models/item`,
+];
+
+/**
+ * Items whose registry name has no dedicated texture file.
+ * Vanilla models point at another layer0 (glint / animation / standby pose is client-side).
+ * Spawn eggs: any `*_spawn_egg` is rewritten to `spawn_egg` in resolveItemTextureIds().
+ */
+const ITEM_TEXTURE_ALIASES: Record<string, string> = {
+  enchanted_golden_apple: "golden_apple",
+  crossbow: "crossbow_standby",
+  clock: "clock_00",
+  compass: "compass_16",
+  recovery_compass: "recovery_compass_16",
+  debug_stick: "stick",
+  tipped_arrow: "tipped_arrow_base",
+  large_fern: "large_fern_top",
+  // Entity-rendered blocks — best flat stand-ins
+  chest: "oak_planks",
+  trapped_chest: "oak_planks",
+  ender_chest: "obsidian",
+  decorated_pot: "decorated_pot_side",
+  shield: "dark_oak_planks",
+  // Infested blocks share the host block texture
+  infested_stone: "stone",
+  infested_cobblestone: "cobblestone",
+  infested_stone_bricks: "stone_bricks",
+  infested_mossy_stone_bricks: "mossy_stone_bricks",
+  infested_cracked_stone_bricks: "cracked_stone_bricks",
+  infested_chiseled_stone_bricks: "chiseled_stone_bricks",
+  infested_deepslate: "deepslate",
+};
+
+function sanitizeItemId(raw: string): string {
+  return String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^minecraft:/, "")
+    .replace(/[^a-z0-9_/.-]/g, "")
+    .slice(0, 96);
+}
+
+/** Ordered texture ids to try for a registry item name (before model lookup). */
+function resolveItemTextureIds(id: string): string[] {
+  const out: string[] = [];
+  const push = (t: string) => {
+    const s = sanitizeItemId(t);
+    if (s && !out.includes(s)) out.push(s);
+  };
+  if (id.endsWith("_spawn_egg")) push("spawn_egg");
+  const alias = ITEM_TEXTURE_ALIASES[id];
+  if (alias) push(alias);
+  push(id);
+  // Common multi-face block item fallbacks
+  for (const suf of ["_side", "_top", "_front", "_bottom"]) {
+    push(id + suf);
+  }
+  return out;
+}
+
+async function fetchBuffer(
+  url: string,
+  timeoutMs = 8000,
+  opts?: { accept?: string; allowNonImage?: boolean },
+): Promise<{ buf: Buffer; type: string } | null> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: ac.signal,
+      headers: {
+        "user-agent": "FractalBot-AssetProxy/1.0",
+        accept: opts?.accept || "image/*,*/*",
+      },
+      redirect: "follow",
+    });
+    if (!res.ok) return null;
+    const type = res.headers.get("content-type") || "application/octet-stream";
+    if (
+      !opts?.allowNonImage &&
+      !type.startsWith("image/") &&
+      !type.includes("octet-stream")
+    ) {
+      return null;
+    }
+    const ab = await res.arrayBuffer();
+    if (!ab.byteLength || ab.byteLength > 2_000_000) return null;
+    const outType = type.startsWith("image/")
+      ? type
+      : opts?.allowNonImage
+        ? type
+        : "image/png";
+    return { buf: Buffer.from(ab), type: outType };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Resolve texture path candidates from item model JSON.
+ * Returns layer0/particle/layer1 and, if missing, the parent block/item id.
+ * Cached as a comma-separated list.
+ */
+async function resolveTextureFromModel(id: string): Promise<string[]> {
+  const cacheKey = `model:${id}`;
+  const hit = assetCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < ASSET_TTL_MS && hit.type === "text/texture-id") {
+    const s = hit.buf.toString("utf8");
+    return s ? s.split(",").filter(Boolean) : [];
+  }
+  const found: string[] = [];
+  const push = (raw: string) => {
+    const path = raw
+      .replace(/^minecraft:/, "")
+      .replace(/^(item|block)\//, "")
+      .replace(/^entity\//, ""); // e.g. entity/decorated_pot/...
+    // Keep nested paths like decorated_pot/decorated_pot_side → last segment is usable
+    const clean = sanitizeItemId(path.includes("/") ? path.split("/").pop()! : path);
+    if (clean && !found.includes(clean)) found.push(clean);
+  };
+
+  for (const base of MC_MODEL_BASES) {
+    const got = await fetchBuffer(`${base}/${id}.json`, 5000, {
+      accept: "application/json,text/plain,*/*",
+      allowNonImage: true,
+    });
+    if (!got) continue;
+    try {
+      const model = JSON.parse(got.buf.toString("utf8")) as {
+        textures?: Record<string, string>;
+        parent?: string;
+      };
+      for (const key of ["layer0", "particle", "layer1", "all", "side", "end", "top", "front"] as const) {
+        const t = model.textures?.[key];
+        if (t) push(t);
+      }
+      // parent: "minecraft:block/furnace" → try furnace (+ _side/_front via resolveItemTextureIds later)
+      const parent = model.parent || "";
+      const m = parent.match(/^(?:minecraft:)?(?:block|item)\/([a-z0-9_/.-]+)$/i);
+      if (m) push(m[1]);
+      if (found.length) {
+        assetCache.set(cacheKey, {
+          buf: Buffer.from(found.join(","), "utf8"),
+          type: "text/texture-id",
+          at: Date.now(),
+        });
+        return found;
+      }
+    } catch {
+      /* ignore bad JSON */
+    }
+  }
+  return found;
+}
+
+/** Extract hash from textures.minecraft.net/texture/<hash> (and https variants). */
+function extractMinecraftTextureHash(direct: string): string | null {
+  if (!direct) return null;
+  const m = direct.match(/textures\.minecraft\.net\/texture\/([a-f0-9]{32,64})/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * Crop a classic/slim skin sheet into a face avatar or a simple front-body preview.
+ * Used when CDN renderers fail (cracked SkinRestorer custom hosts).
+ */
+function renderSkinFromSheet(buf: Buffer, style: "avatar" | "body"): Buffer | null {
+  try {
+    const src = PNG.sync.read(buf);
+    const w = src.width;
+    const h = src.height;
+    // Classic 64×64 or 64×32 (legacy)
+    if (w < 64 || h < 32) return null;
+
+    const scale = style === "avatar" ? 8 : 4;
+    // Face is at (8,8) size 8×8 on a 64-wide sheet
+    if (style === "avatar") {
+      const out = new PNG({ width: 8 * scale, height: 8 * scale });
+      blitNearest(src, 8, 8, 8, 8, out, scale);
+      // Hat layer (40,8) if non-transparent
+      blitNearest(src, 40, 8, 8, 8, out, scale, true);
+      return PNG.sync.write(out);
+    }
+
+    // Body preview: head + torso + legs, front view (approx 16×32 source px)
+    // head 8×8 @ (8,8), body 8×12 @ (20,20), leg 4×12 @ (4,20), arm 4×12 @ (44,20)
+    const outW = 16 * scale;
+    const outH = 32 * scale;
+    const out = new PNG({ width: outW, height: outH });
+    // clear transparent
+    out.data.fill(0);
+    // head
+    blitNearestInto(src, 8, 8, 8, 8, out, 4 * scale, 0, scale);
+    blitNearestInto(src, 40, 8, 8, 8, out, 4 * scale, 0, scale, true); // hat
+    // body
+    blitNearestInto(src, 20, 20, 8, 12, out, 4 * scale, 8 * scale, scale);
+    // right leg / left leg
+    blitNearestInto(src, 4, 20, 4, 12, out, 4 * scale, 20 * scale, scale);
+    blitNearestInto(src, 20, 52, 4, 12, out, 8 * scale, 20 * scale, scale); // left leg (64×64)
+    // arms
+    blitNearestInto(src, 44, 20, 4, 12, out, 0, 8 * scale, scale);
+    blitNearestInto(src, 36, 52, 4, 12, out, 12 * scale, 8 * scale, scale);
+    return PNG.sync.write(out);
+  } catch {
+    return null;
+  }
+}
+
+type SkinPng = { width: number; height: number; data: Buffer };
+
+function blitNearest(
+  src: SkinPng,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+  dst: SkinPng,
+  scale: number,
+  overlay = false,
+): void {
+  blitNearestInto(src, sx, sy, sw, sh, dst, 0, 0, scale, overlay);
+}
+
+function blitNearestInto(
+  src: SkinPng,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+  dst: SkinPng,
+  dx: number,
+  dy: number,
+  scale: number,
+  overlay = false,
+): void {
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      const si = ((sy + y) * src.width + (sx + x)) << 2;
+      const r = src.data[si];
+      const g = src.data[si + 1];
+      const b = src.data[si + 2];
+      const a = src.data[si + 3];
+      if (overlay && a < 10) continue;
+      for (let oy = 0; oy < scale; oy++) {
+        for (let ox = 0; ox < scale; ox++) {
+          const di = ((dy + y * scale + oy) * dst.width + (dx + x * scale + ox)) << 2;
+          if (di < 0 || di + 3 >= dst.data.length) continue;
+          if (overlay && a < 250) {
+            // simple alpha over
+            const inv = 255 - a;
+            dst.data[di] = (r * a + dst.data[di] * inv) / 255;
+            dst.data[di + 1] = (g * a + dst.data[di + 1] * inv) / 255;
+            dst.data[di + 2] = (b * a + dst.data[di + 2] * inv) / 255;
+            dst.data[di + 3] = Math.min(255, dst.data[di + 3] + a);
+          } else {
+            dst.data[di] = r;
+            dst.data[di + 1] = g;
+            dst.data[di + 2] = b;
+            dst.data[di + 3] = a || 255;
+          }
+        }
+      }
+    }
+  }
+}
+
+async function serveAssetProxy(url: URL, res: http.ServerResponse): Promise<void> {
+  // /asset/item/<id>.png  or  /asset/item?name=diamond_sword
+  // /asset/skin?u=Name&url=<optional server texture>&kind=avatar|body
+  const pathParts = url.pathname.split("/").filter(Boolean);
+  const kind = pathParts[1];
+
+  if (kind === "item") {
+    let id = pathParts[2] || url.searchParams.get("name") || "";
+    id = sanitizeItemId(id.replace(/\.png$/i, ""));
+    if (!id) {
+      res.writeHead(400, securityHeaders({ "content-type": "text/plain" }));
+      res.end("bad item");
+      return;
+    }
+    const cacheKey = `item:${id}`;
+    const hit = assetCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < ASSET_TTL_MS && hit.type.startsWith("image/")) {
+      res.writeHead(200, securityHeaders({ "content-type": hit.type, "cache-control": "public, max-age=86400" }));
+      res.end(hit.buf);
+      return;
+    }
+
+    // alias / spawn_egg / multi-face → original → model layer0 / parent
+    const textureIds = resolveItemTextureIds(id);
+    for (const mid of await resolveTextureFromModel(id)) {
+      if (!textureIds.includes(mid)) textureIds.push(mid);
+      // parent block names often need _side / _front
+      for (const suf of ["_side", "_top", "_front"]) {
+        const withSuf = sanitizeItemId(mid + suf);
+        if (withSuf && !textureIds.includes(withSuf)) textureIds.push(withSuf);
+      }
+    }
+
+    const candidates: string[] = [];
+    for (const tid of textureIds) {
+      for (const base of MC_TEXTURE_BASES) {
+        candidates.push(`${base}/item/${tid}.png`);
+        candidates.push(`${base}/block/${tid}.png`);
+      }
+    }
+    for (const src of candidates) {
+      const got = await fetchBuffer(src);
+      if (got) {
+        assetCache.set(cacheKey, { ...got, at: Date.now() });
+        res.writeHead(200, securityHeaders({ "content-type": got.type, "cache-control": "public, max-age=86400" }));
+        res.end(got.buf);
+        return;
+      }
+    }
+    res.writeHead(404, securityHeaders({ "content-type": "text/plain" }));
+    res.end("texture not found");
+    return;
+  }
+
+  if (kind === "skin") {
+    // kind=avatar → face only (nearby list); kind=body → full figure (inventory panel)
+    const style = String(url.searchParams.get("kind") || "avatar").toLowerCase() === "body" ? "body" : "avatar";
+    const user = String(url.searchParams.get("u") || "").trim().slice(0, 32);
+    const direct = String(url.searchParams.get("url") || "").trim();
+    const cacheKey = `skin:${style}:${user}|${direct}`;
+    const hit = assetCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < ASSET_TTL_MS && hit.type.startsWith("image/")) {
+      res.writeHead(200, securityHeaders({ "content-type": hit.type, "cache-control": "public, max-age=3600" }));
+      res.end(hit.buf);
+      return;
+    }
+
+    const candidates: string[] = [];
+    // Prefer rendered heads/bodies — never serve the raw 64×64 skin sheet as an avatar.
+    if (user) {
+      if (style === "body") {
+        candidates.push(`https://mc-heads.net/body/${encodeURIComponent(user)}/right`);
+        candidates.push(`https://crafthead.net/body/${encodeURIComponent(user)}`);
+        candidates.push(`https://mc-heads.net/player/${encodeURIComponent(user)}`);
+      } else {
+        candidates.push(`https://mc-heads.net/avatar/${encodeURIComponent(user)}/64`);
+        candidates.push(`https://crafthead.net/avatar/${encodeURIComponent(user)}`);
+        candidates.push(`https://mc-heads.net/head/${encodeURIComponent(user)}/64`);
+      }
+    }
+    // textures.minecraft.net/texture/<hash> → render by hash (premium + some cracked)
+    const texHash = extractMinecraftTextureHash(direct);
+    if (texHash) {
+      if (style === "body") {
+        candidates.push(`https://mc-heads.net/body/${texHash}/right`);
+        candidates.push(`https://crafthead.net/body/${texHash}`);
+      } else {
+        candidates.push(`https://mc-heads.net/avatar/${texHash}/64`);
+        candidates.push(`https://crafthead.net/avatar/${texHash}`);
+      }
+    }
+
+    for (const src of candidates) {
+      const got = await fetchBuffer(src);
+      if (got) {
+        assetCache.set(cacheKey, { ...got, at: Date.now() });
+        res.writeHead(200, securityHeaders({ "content-type": got.type, "cache-control": "public, max-age=3600" }));
+        res.end(got.buf);
+        return;
+      }
+    }
+
+    // SkinRestorer / custom URL: fetch raw sheet and crop face (or scale body region)
+    if (direct && /^https?:\/\//i.test(direct)) {
+      const raw = await fetchBuffer(direct);
+      if (raw) {
+        const rendered = renderSkinFromSheet(raw.buf, style);
+        if (rendered) {
+          assetCache.set(cacheKey, { buf: rendered, type: "image/png", at: Date.now() });
+          res.writeHead(200, securityHeaders({ "content-type": "image/png", "cache-control": "public, max-age=3600" }));
+          res.end(rendered);
+          return;
+        }
+      }
+    }
+
+    res.writeHead(404, securityHeaders({ "content-type": "text/plain" }));
+    res.end("skin not found");
+    return;
+  }
+
+  res.writeHead(404, securityHeaders({ "content-type": "text/plain" }));
+  res.end("unknown asset");
 }

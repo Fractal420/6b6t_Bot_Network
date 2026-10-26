@@ -274,6 +274,9 @@ function renderOpsStrip(data) {
 function renderStatus(data) {
   status = data;
   window.__fractalStatus = data;
+  if (data?.username && data?.skinUrl) rememberSkinUrl(data.username, data.skinUrl);
+  // Keep inventory figure in sync when status (incl. cracked skin) arrives
+  try { updateInventorySkin(); } catch { /* icons may load later */ }
   const phase = document.getElementById("phase");
   setPill(phase, data.phase || "idle", phaseTone(data.phase, data.lastError));
   document.getElementById("world").textContent = data.worldKind || "—";
@@ -1102,11 +1105,17 @@ function renderPlayers(players) {
   document.getElementById("player-count").textContent = rows.length ? `(${rows.length})` : "";
   for (const p of rows) {
     const li = document.createElement("li");
-    const name = document.createElement("span");
-    name.textContent = String(p.username ?? "");
+    li.className = "player-row";
+    const name = String(p.username ?? "");
+    if (p.skinUrl) rememberSkinUrl(name, p.skinUrl);
+    const av = playerAvatarEl(name, p.skinUrl, 24);
+    const nameEl = document.createElement("span");
+    nameEl.className = "player-name";
+    nameEl.textContent = name;
     const distEl = document.createElement("span");
+    distEl.className = "player-dist";
     distEl.textContent = `${Number(p.distance).toFixed(1)}m`;
-    li.append(name, distEl);
+    li.append(av, nameEl, distEl);
     ul.append(li);
   }
   if (!rows.length) {
@@ -1168,6 +1177,220 @@ function itemTint(name) {
   return `hsl(${16 + t * 38} ${38 + t * 18}% ${16 + t * 14}%)`;
 }
 
+
+/** Minecraft texture CDNs (try several — phones / CDNs fail intermittently). */
+const MC_ASSET_VER = "1.21.1";
+const MC_ICON_BASES = [
+  `https://assets.mcasset.cloudflare.com/${MC_ASSET_VER}/assets/minecraft/textures`,
+  `https://cdn.jsdelivr.net/gh/InventivetalentDev/minecraft-assets@${MC_ASSET_VER}/assets/minecraft/textures`,
+  `https://raw.githubusercontent.com/InventivetalentDev/minecraft-assets/${MC_ASSET_VER}/assets/minecraft/textures`,
+];
+/**
+ * Registry names with no dedicated PNG (vanilla model points at another texture).
+ * Keep in sync with server ITEM_TEXTURE_ALIASES — proxy also resolves via model JSON
+ * and `_side`/`_front` fallbacks for block items.
+ */
+const ITEM_TEXTURE_ALIASES = {
+  enchanted_golden_apple: "golden_apple",
+  crossbow: "crossbow_standby",
+  clock: "clock_00",
+  compass: "compass_16",
+  recovery_compass: "recovery_compass_16",
+  debug_stick: "stick",
+  tipped_arrow: "tipped_arrow_base",
+  large_fern: "large_fern_top",
+  chest: "oak_planks",
+  trapped_chest: "oak_planks",
+  ender_chest: "obsidian",
+  shield: "dark_oak_planks",
+  infested_stone: "stone",
+  infested_cobblestone: "cobblestone",
+  infested_stone_bricks: "stone_bricks",
+  infested_mossy_stone_bricks: "mossy_stone_bricks",
+  infested_cracked_stone_bricks: "cracked_stone_bricks",
+  infested_chiseled_stone_bricks: "chiseled_stone_bricks",
+  infested_deepslate: "deepslate",
+};
+/** id → resolved absolute URL once we find one that loads */
+const itemIconResolved = new Map();
+
+function itemTextureId(name) {
+  let raw = name;
+  if (raw && typeof raw === "object") {
+    raw = raw.text || raw.value || "";
+  }
+  raw = String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^minecraft:/, "");
+  if (!raw || raw === "air" || raw === "empty" || raw === "unknown") return "";
+  const id = raw.replace(/[^a-z0-9_/.-]/g, "");
+  if (id.endsWith("_spawn_egg")) return "spawn_egg";
+  return ITEM_TEXTURE_ALIASES[id] || id;
+}
+
+function itemIconUrls(name) {
+  const id = itemTextureId(name);
+  if (!id) return [];
+  if (itemIconResolved.has(id)) return [itemIconResolved.get(id)];
+  // Same-origin proxy (CSP img-src 'self' only — external CDNs are blocked).
+  // Server also resolves model layer0 aliases for items we haven't hard-coded.
+  return [`/asset/item/${encodeURIComponent(id)}.png`];
+}
+
+function setItemIcon(img, name) {
+  if (!img) return;
+  const id = itemTextureId(name);
+  const urls = itemIconUrls(name);
+  const cell = img.parentElement;
+  if (!urls.length) {
+    img.removeAttribute("src");
+    img.hidden = true;
+    img.dataset.iconId = "";
+    cell?.classList.add("no-icon");
+    return;
+  }
+  // Already showing this item successfully
+  if (img.dataset.iconId === id && img.complete && img.naturalWidth > 0 && !img.hidden) {
+    cell?.classList.remove("no-icon");
+    return;
+  }
+  // Keep text visible until a texture loads
+  cell?.classList.add("no-icon");
+  img.dataset.iconId = id;
+  img.dataset.iconTry = "0";
+  img.hidden = false;
+  img.decoding = "async";
+  img.referrerPolicy = "no-referrer";
+  img.onerror = () => {
+    const i = Number(img.dataset.iconTry || "0") + 1;
+    img.dataset.iconTry = String(i);
+    if (i < urls.length) {
+      img.src = urls[i];
+    } else {
+      img.hidden = true;
+      img.removeAttribute("src");
+      cell?.classList.add("no-icon");
+    }
+  };
+  img.onload = () => {
+    if (img.naturalWidth > 0) {
+      img.hidden = false;
+      cell?.classList.remove("no-icon");
+      if (id) itemIconResolved.set(id, img.currentSrc || img.src);
+    }
+  };
+  img.src = urls[0];
+}
+
+/** username(lower) → last known skin URL (from bot / nearby / status) */
+const skinUrlCache = new Map();
+
+function rememberSkinUrl(username, url) {
+  if (!username || !url) return;
+  skinUrlCache.set(String(username).toLowerCase(), String(url));
+}
+
+function activeBotUsername() {
+  const fromStatus = status?.username || status?.name;
+  if (fromStatus) return String(fromStatus);
+  const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
+  return bot?.username ? String(bot.username) : "";
+}
+
+/** Tiny Steve silhouette when every skin CDN fails (offline / cracked). */
+const STEVE_PLACEHOLDER =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="80" viewBox="0 0 40 80">` +
+      `<rect width="40" height="80" fill="#2a2a2a"/>` +
+      `<rect x="12" y="4" width="16" height="16" fill="#c6a57b"/>` +
+      `<rect x="10" y="20" width="20" height="24" fill="#3d6ea5"/>` +
+      `<rect x="4" y="20" width="6" height="24" fill="#3d6ea5"/>` +
+      `<rect x="30" y="20" width="6" height="24" fill="#3d6ea5"/>` +
+      `<rect x="12" y="44" width="7" height="28" fill="#3a4570"/>` +
+      `<rect x="21" y="44" width="7" height="28" fill="#3a4570"/>` +
+      `</svg>`,
+  );
+
+/**
+ * Prefer rendered skins via local proxy (CSP blocks external img hosts).
+ * kind=avatar → face (nearby list); kind=body → full figure (inventory panel).
+ * Never use the raw 64×64 sheet as an <img> — the proxy crops/renders it.
+ */
+function resolveSkinUrls(username, skinUrl, kind = "avatar") {
+  const user = String(username || "").trim();
+  const direct = skinUrl || (user ? skinUrlCache.get(user.toLowerCase()) : "");
+  const urls = [];
+  if (user || direct) {
+    const q = new URLSearchParams();
+    if (user) q.set("u", user);
+    if (direct) q.set("url", direct);
+    q.set("kind", kind === "body" ? "body" : "avatar");
+    urls.push(`/asset/skin?${q.toString()}`);
+  }
+  urls.push(STEVE_PLACEHOLDER);
+  return urls;
+}
+
+function applySkinToImage(img, username, skinUrl, kind = "avatar") {
+  if (!img) return;
+  const urls = resolveSkinUrls(username, skinUrl, kind);
+  if (!urls.length) {
+    img.hidden = true;
+    img.removeAttribute("src");
+    return;
+  }
+  img.hidden = false;
+  img.alt = username ? `${username} skin` : "skin";
+  img.dataset.skinTry = "0";
+  img.dataset.skinKey = `${username || ""}|${kind}|${urls[0]}`;
+  img.onerror = () => {
+    const i = Number(img.dataset.skinTry || "0") + 1;
+    img.dataset.skinTry = String(i);
+    if (i < urls.length) img.src = urls[i];
+    else {
+      img.hidden = true;
+      img.removeAttribute("src");
+    }
+  };
+  img.onload = () => {
+    img.hidden = false;
+  };
+  img.src = urls[0];
+}
+
+let lastSkinKey = "";
+function updateInventorySkin() {
+  const img = document.getElementById("inv-skin");
+  const label = document.getElementById("inv-skin-name");
+  const user = activeBotUsername();
+  const serverUrl = status?.skinUrl || skinUrlCache.get(String(user || "").toLowerCase());
+  if (label) label.textContent = user || "no skin";
+  if (!img) return;
+  const key = `${user}|body|${serverUrl || ""}`;
+  if (key === lastSkinKey && img.src && !img.hidden) return;
+  lastSkinKey = key;
+  if (!user && !serverUrl) {
+    img.hidden = true;
+    img.removeAttribute("src");
+    return;
+  }
+  applySkinToImage(img, user, serverUrl, "body");
+}
+
+function playerAvatarEl(username, skinUrl, size = 22) {
+  const img = document.createElement("img");
+  img.className = "player-avatar";
+  img.width = size;
+  img.height = size;
+  img.alt = "";
+  img.decoding = "async";
+  img.referrerPolicy = "no-referrer";
+  applySkinToImage(img, username, skinUrl, "avatar");
+  return img;
+}
+
 function fillCells(root, slots, bySlot, heldSlot) {
   if (!root) return;
   if (!root.childElementCount) {
@@ -1176,7 +1399,7 @@ function fillCells(root, slots, bySlot, heldSlot) {
       btn.type = "button";
       btn.className = "inv-cell empty";
       btn.dataset.slot = String(slot);
-      btn.innerHTML = `<span class="tag"></span><span class="qty"></span><span class="wear" hidden><i></i></span>`;
+      btn.innerHTML = `<img class="icon" alt="" draggable="false" hidden /><span class="tag"></span><span class="qty"></span><span class="wear" hidden><i></i></span>`;
       root.append(btn);
     }
   }
@@ -1186,6 +1409,15 @@ function fillCells(root, slots, bySlot, heldSlot) {
     const tag = btn.querySelector(".tag");
     const qty = btn.querySelector(".qty");
     const wear = btn.querySelector(".wear");
+    let icon = btn.querySelector("img.icon");
+    if (!icon) {
+      icon = document.createElement("img");
+      icon.className = "icon";
+      icon.alt = "";
+      icon.draggable = false;
+      icon.hidden = true;
+      btn.prepend(icon);
+    }
     btn.classList.toggle("empty", !item);
     btn.classList.toggle("held", slot === heldSlot);
     btn.classList.toggle("on", slot === selectedSlot);
@@ -1193,11 +1425,18 @@ function fillCells(root, slots, bySlot, heldSlot) {
     btn.title = item
       ? `${label} ×${item.count}`
       : SLOT_LABELS[slot] || `empty ${slot}`;
-    btn.style.background = item ? itemTint(item.name) : "";
-    // Slot badge = item TYPE (gapple, totem…), never custom anvil name —
-    // custom names often share a kit prefix and made every cell read "FRACT".
+    // Keep neutral MC slot chrome; tint only as soft fallback under icon
+    btn.style.background = "";
+    if (item) setItemIcon(icon, item.name || label);
+    else {
+      icon.hidden = true;
+      icon.removeAttribute("src");
+      icon.dataset.iconId = "";
+      btn.classList.remove("no-icon");
+    }
+    // Short name always set — CSS hides it once the texture loads
     tag.textContent = item ? shortTag(item.name || label) : "";
-    qty.textContent = item && item.count > 1 ? `×${item.count}` : "";
+    qty.textContent = item && item.count > 1 ? String(item.count) : "";
     if (item?.maxDurability) {
       wear.hidden = false;
       const left = 1 - (item.durabilityUsed || 0) / item.maxDurability;
@@ -1239,6 +1478,7 @@ function renderInventory(data) {
     else if (selected) nameEl.textContent = `${itemLabel(selected)}  slot ${selectedSlot}  ×${selected.count}`;
     else nameEl.textContent = `empty slot ${selectedSlot} · click another to move here`;
   }
+  updateInventorySkin();
 }
 
 async function invOp(op, extra = {}) {
@@ -1531,10 +1771,10 @@ async function sendControl() {
 }
 
 
-/* On-screen steer pad (touch / mouse) */
-(function bindSteerPad() {
-  const press = (control, down) => {
-    if (!control) return;
+/* On-screen gamepad (under 3D view) — hold movement mods, press actions */
+(function bindGamepad() {
+  const pressKey = (control, down) => {
+    if (!control || !(control in keys)) return;
     if (down) {
       if (keys[control]) return;
       keys[control] = true;
@@ -1546,19 +1786,110 @@ async function sendControl() {
     }
     void sendControl();
   };
-  document.querySelectorAll(".pad [data-k]").forEach((el) => {
+
+  const bindHold = (el, onDown, onUp) => {
+    let held = false;
+    const down = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      if (held) return;
+      held = true;
+      el.classList.add("down");
+      onDown();
+    };
+    const up = (e) => {
+      if (e) e.preventDefault();
+      if (!held) return;
+      held = false;
+      el.classList.remove("down");
+      onUp();
+    };
+    el.addEventListener("pointerdown", down);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+    el.addEventListener("lostpointercapture", up);
+  };
+
+  // Movement + stance (forward/back/left/right/jump/sneak/sprint)
+  document.querySelectorAll("#gamepad [data-k]").forEach((el) => {
     const control = el.getAttribute("data-k");
-    el.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-      press(control, true);
-    });
-    el.addEventListener("pointerup", (e) => {
-      e.preventDefault();
-      press(control, false);
-    });
-    el.addEventListener("pointercancel", () => press(control, false));
-    el.addEventListener("pointerleave", () => press(control, false));
+    bindHold(
+      el,
+      () => pressKey(control, true),
+      () => pressKey(control, false),
+    );
+  });
+
+  // Look — hold to keep turning
+  const lookTimers = new Map();
+  document.querySelectorAll("#gamepad [data-turn]").forEach((el) => {
+    const raw = el.getAttribute("data-turn") || "0,0";
+    const [yawS, pitchS] = raw.split(",");
+    const yaw = Number(yawS) || 0;
+    const pitch = Number(pitchS) || 0;
+    bindHold(
+      el,
+      () => {
+        const tick = () => {
+          void rpc("turn", { yaw, pitch });
+        };
+        tick();
+        const id = setInterval(tick, 120);
+        lookTimers.set(el, id);
+      },
+      () => {
+        const id = lookTimers.get(el);
+        if (id) clearInterval(id);
+        lookTimers.delete(el);
+      },
+    );
+  });
+
+  // L / R — same roles as mouse buttons in Minecraft
+  const clickTimers = new Map();
+  document.querySelectorAll("#gamepad [data-click]").forEach((el) => {
+    const side = el.getAttribute("data-click");
+    if (side === "left") {
+      // Left: attack + dig while held
+      bindHold(
+        el,
+        () => {
+          void rpc("attack", {});
+          void rpc("dig", {}).catch(() => {});
+          void rpc("swing", {}).catch(() => {});
+          clickTimers.set(
+            el,
+            setInterval(() => {
+              void rpc("attack", {});
+            }, 350),
+          );
+        },
+        () => {
+          const id = clickTimers.get(el);
+          if (id) clearInterval(id);
+          clickTimers.delete(el);
+          void rpc("stopDig", {}).catch(() => {});
+        },
+      );
+      return;
+    }
+    if (side === "right") {
+      // Right: place / use item / activate
+      bindHold(
+        el,
+        () => {
+          void rpc("place", {}).catch(() => {});
+          void invOp("use", {}).catch(() => {});
+          void rpc("activate", {}).catch(() => {});
+        },
+        () => {},
+      );
+    }
   });
 })();
 
@@ -1572,7 +1903,7 @@ function clearBotKeys() {
     if (!keys[name]) continue;
     keys[name] = false;
     any = true;
-    document.querySelector(`[data-k="${name}"]`)?.classList.remove("down");
+    document.querySelectorAll(`[data-k="${name}"]`).forEach((el) => el.classList.remove("down"));
   }
   if (any) void sendControl();
 }
@@ -1647,7 +1978,7 @@ window.addEventListener("keydown", (event) => {
   event.preventDefault();
   if (keys[control]) return;
   keys[control] = true;
-  document.querySelector(`[data-k="${control}"]`)?.classList.add("down");
+  document.querySelectorAll(`[data-k="${control}"]`).forEach((el) => el.classList.add("down"));
   void sendControl();
 });
 
@@ -1656,7 +1987,7 @@ window.addEventListener("keyup", (event) => {
   if (!control) return;
   if (!keys[control]) return;
   keys[control] = false;
-  document.querySelector(`[data-k="${control}"]`)?.classList.remove("down");
+  document.querySelectorAll(`[data-k="${control}"]`).forEach((el) => el.classList.remove("down"));
   void sendControl();
 });
 
@@ -1723,7 +2054,15 @@ const DET_NOTIFY_KEYS = {
   tnt: "fractal-det-notify-tnt",
   explosions: "fractal-det-notify-explosions",
   onlyHidden: "fractal-det-notify-hidden",
+  /** When false (default), never push-notify while bot is in lobby / auth / queue. */
+  lobby: "fractal-det-notify-lobby",
 };
+
+/** Lobby-like worlds where detection spam is expected (auth island, dual portals, limbo). */
+function isLobbyLikeWorld(kind) {
+  const k = String(kind || "").toLowerCase();
+  return k === "lobby" || k === "auth" || k === "backup" || k === "queue";
+}
 
 function detNotifyPref(key, defaultOn) {
   try {
@@ -1752,6 +2091,8 @@ function loadDetNotifyPrefs() {
     tnt: detNotifyPref(DET_NOTIFY_KEYS.tnt, false),
     explosions: detNotifyPref(DET_NOTIFY_KEYS.explosions, false),
     onlyHidden: detNotifyPref(DET_NOTIFY_KEYS.onlyHidden, true),
+    // Default OFF — lobby is ignored for push notifications
+    lobby: detNotifyPref(DET_NOTIFY_KEYS.lobby, false),
   };
 }
 
@@ -1765,6 +2106,7 @@ function saveDetNotifyPrefsFromForm(form) {
   if (form.notifyTnt) setDetNotifyPref(DET_NOTIFY_KEYS.tnt, boolSel(form.notifyTnt.value));
   if (form.notifyExplosions) setDetNotifyPref(DET_NOTIFY_KEYS.explosions, boolSel(form.notifyExplosions.value));
   if (form.notifyOnlyHidden) setDetNotifyPref(DET_NOTIFY_KEYS.onlyHidden, boolSel(form.notifyOnlyHidden.value));
+  if (form.notifyInLobby) setDetNotifyPref(DET_NOTIFY_KEYS.lobby, boolSel(form.notifyInLobby.value));
 }
 
 function fillDetNotifyForm(form) {
@@ -1777,6 +2119,7 @@ function fillDetNotifyForm(form) {
   if (form.notifyTnt) form.notifyTnt.value = p.tnt ? "true" : "false";
   if (form.notifyExplosions) form.notifyExplosions.value = p.explosions ? "true" : "false";
   if (form.notifyOnlyHidden) form.notifyOnlyHidden.value = p.onlyHidden ? "true" : "false";
+  if (form.notifyInLobby) form.notifyInLobby.value = p.lobby ? "true" : "false";
 }
 
 function detectionNotifyWanted(kind) {
@@ -1794,6 +2137,9 @@ function notifyDetection(ev) {
   if (!ev || !ev.kind) return;
   if (!detectionNotifyWanted(ev.kind)) return;
   const prefs = loadDetNotifyPrefs();
+  // Lobby / auth / queue: ignore by default (toggle in Detect settings)
+  const world = ev.worldKind || status?.worldKind || "";
+  if (!prefs.lobby && isLobbyLikeWorld(world)) return;
   if (prefs.onlyHidden && !document.hidden) return;
   if (!("Notification" in window) || Notification.permission !== "granted") return;
 
@@ -1891,7 +2237,18 @@ function renderDetectionLog() {
     li.className = ev.kind || "";
     const time = document.createElement("time");
     time.textContent = fmtLocalFrom(ev.at);
-    li.append(time, document.createTextNode(ev.message));
+    li.append(time);
+    const who = ev.username || ev.player;
+    if (who) {
+      if (ev.skinUrl) rememberSkinUrl(who, ev.skinUrl);
+      else if (skinUrlCache.has(String(who).toLowerCase())) {
+        /* already known */
+      }
+      const av = playerAvatarEl(String(who), ev.skinUrl || skinUrlCache.get(String(who).toLowerCase()), 18);
+      av.classList.add("detect-av");
+      li.append(av);
+    }
+    li.append(document.createTextNode(ev.message));
     ol.append(li);
   }
 }
@@ -2836,15 +3193,8 @@ document.addEventListener("keydown", (e) => {
 let fleetManageOpen = false;
 let tabBeforeFleet = "play";
 
-/** Module catalog for sidebar + search palette */
+/** Module catalog for sidebar + search palette (Play is the home page, not a module). */
 const MODULES = [
-  {
-    id: "play",
-    name: "Play",
-    desc: "Control, wire, inventory, nearby",
-    icon: "▶",
-    keywords: ["play", "control", "wire", "chat", "inventory", "move", "goto", "nearby"],
-  },
   {
     id: "map",
     name: "Map",
@@ -2882,6 +3232,11 @@ const UTILITIES = [
     keywords: ["log", "activity", "history", "events"],
   },
 ];
+
+/** Home page = Play panel (control / inventory / nearby / wire). */
+function goHome() {
+  activateTab("play");
+}
 
 function openFleetManage() {
   const current =
@@ -2946,7 +3301,7 @@ function activateTab(name) {
     if (on) btn.setAttribute("aria-current", "page");
     else btn.removeAttribute("aria-current");
   }
-  for (const btn of document.querySelectorAll("#nav-settings, #nav-log")) {
+  for (const btn of document.querySelectorAll("#nav-settings, #nav-log, #nav-home")) {
     const on = btn.getAttribute("data-tab") === tabName;
     btn.classList.toggle("on", on);
   }
@@ -3043,14 +3398,21 @@ function renderSideNav(query) {
   }
 }
 
-document.querySelectorAll("#nav-settings, #nav-log").forEach((btn) => {
+document.querySelectorAll("#nav-settings, #nav-log, #nav-home").forEach((btn) => {
   btn.addEventListener("click", () => {
     closeProfileDropdown();
     closeSidebar();
     const search = document.getElementById("sidebar-search");
     if (search) search.value = "";
-    activateTab(btn.getAttribute("data-tab"));
+    activateTab(btn.getAttribute("data-tab") || "play");
   });
+});
+document.querySelector(".brand")?.addEventListener("click", (e) => {
+  // Brand mark → home (Play)
+  e.preventDefault();
+  closeProfileDropdown();
+  closeSidebar();
+  goHome();
 });
 document.getElementById("nav-toggle")?.addEventListener("click", () => {
   closeProfileDropdown();
@@ -3084,6 +3446,7 @@ renderSideNav("");
 const hashTab = (location.hash || "").replace(/^#/, "");
 const valid = new Set(["play", "map", "detect", "announce", "settings", "log"]);
 const legacy = {
+  home: "play",
   profiles: "play",
   status: "play",
   tasks: "play",

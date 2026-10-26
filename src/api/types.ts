@@ -72,6 +72,8 @@ export interface InvCommand {
 export interface PlayerInfo {
   username: string;
   uuid?: string;
+  /** Skin texture URL from server profile (works for cracked / SkinRestorer). */
+  skinUrl?: string;
   ping?: number;
   gamemode?: string;
   distance?: number;
@@ -83,6 +85,8 @@ export interface BotStatus {
   phase: BotPhase;
   connected: boolean;
   username: string;
+  /** Own skin texture URL when the server sent one (cracked skins included). */
+  skinUrl?: string;
   host: string;
   port: number;
   version?: string;
@@ -283,8 +287,14 @@ export interface DetectionEvent {
   kind: DetectionKind;
   label: string;
   message: string;
+  /** Player name when the event is about a person */
+  username?: string;
+  /** Server-provided skin texture (cracked skins included) */
+  skinUrl?: string;
   position?: { x: number; y: number; z: number };
   distance?: number;
+  /** World at the time of the event (lobby/auth/backup vs main). */
+  worldKind?: WorldKind;
 }
 
 export type ControlRequest =

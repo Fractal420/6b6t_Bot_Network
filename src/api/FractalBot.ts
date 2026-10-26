@@ -85,6 +85,8 @@ export class FractalBot extends EventEmitter {
   private detectionLog: DetectionEvent[] = [];
   /** Entity ids currently tracked as in-range players. */
   private nearbyPlayers = new Map<number, { username: string; enteredAt: number }>();
+  /** username(lower) → texture URL from tab-list / SkinRestorer properties */
+  private playerSkinUrls = new Map<string, string>();
   /** Periodic sweep so teleports / missed entityGone still emit leave events. */
   private detectionRecheckTimer: NodeJS.Timeout | null = null;
   private joinGeneration = 0;
@@ -163,6 +165,7 @@ export class FractalBot extends EventEmitter {
       phase: this.phase,
       connected: Boolean(bot),
       username: this.config.username,
+      skinUrl: this.skinFor(this.config.username) || this.skinFor(bot?.username),
       host: this.config.host,
       port: this.config.port,
       version: bot?.version,
@@ -401,6 +404,44 @@ export class FractalBot extends EventEmitter {
     } catch {}
   }
 
+
+  /** Decode Mojang-style textures property (also used by SkinRestorer with custom URLs). */
+  private static skinUrlFromProperties(properties: unknown): string | undefined {
+    if (!Array.isArray(properties)) return undefined;
+    const tex = properties.find(
+      (p) => p && typeof p === "object" && String((p as { name?: string }).name || "") === "textures",
+    ) as { value?: string } | undefined;
+    if (!tex?.value || typeof tex.value !== "string") return undefined;
+    try {
+      const json = JSON.parse(Buffer.from(tex.value, "base64").toString("utf8")) as {
+        textures?: { SKIN?: { url?: string } };
+      };
+      const url = json?.textures?.SKIN?.url;
+      if (url && typeof url === "string" && /^https?:\/\//i.test(url)) return url;
+    } catch {
+      /* ignore */
+    }
+    return undefined;
+  }
+
+  private rememberSkin(username: string | undefined, properties: unknown, uuid?: string): void {
+    const name = String(username || "").trim();
+    if (!name) return;
+    const url = FractalBot.skinUrlFromProperties(properties);
+    if (!url) return;
+    this.playerSkinUrls.set(name.toLowerCase(), url);
+    if (uuid) this.playerSkinUrls.set(String(uuid).toLowerCase(), url);
+  }
+
+  private skinFor(username: string | undefined, uuid?: string): string | undefined {
+    if (uuid) {
+      const byUuid = this.playerSkinUrls.get(String(uuid).toLowerCase());
+      if (byUuid) return byUuid;
+    }
+    if (username) return this.playerSkinUrls.get(String(username).toLowerCase());
+    return undefined;
+  }
+
   getPlayers(): PlayerInfo[] {
     const bot = this.requireBot();
     const origin = bot.entity?.position;
@@ -430,6 +471,7 @@ export class FractalBot extends EventEmitter {
       return {
         username: player.username,
         uuid: player.uuid,
+        skinUrl: this.skinFor(player.username, player.uuid),
         ping: player.ping,
         gamemode: player.gamemode !== undefined ? String(player.gamemode) : undefined,
         distance: origin && entityPos ? origin.distanceTo(entityPos) : undefined,
@@ -454,6 +496,7 @@ export class FractalBot extends EventEmitter {
       nearby: [...this.nearbyPlayers.values()].map((p) => ({
         username: p.username,
         enteredAt: p.enteredAt,
+        skinUrl: this.skinFor(p.username),
       })),
     };
   }
@@ -480,6 +523,7 @@ export class FractalBot extends EventEmitter {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       at: new Date().toISOString(),
       ...event,
+      worldKind: event.worldKind ?? this.worldKind,
     };
     this.detectionLog.unshift(full);
     if (this.detectionLog.length > 200) this.detectionLog.length = 200;
@@ -635,6 +679,8 @@ export class FractalBot extends EventEmitter {
       this.pushDetection({
         kind: "player_enter",
         label: rawName,
+        username: rawName,
+        skinUrl: this.skinFor(rawName),
         message: `${rawName} entered range${dist != null ? ` (${dist}m)` : ""}`,
         position: pos,
         distance: dist,
@@ -647,6 +693,8 @@ export class FractalBot extends EventEmitter {
       this.pushDetection({
         kind: "player_leave",
         label: prev.username,
+        username: prev.username,
+        skinUrl: this.skinFor(prev.username),
         message: `${prev.username} left range`,
       });
     }
@@ -659,10 +707,75 @@ export class FractalBot extends EventEmitter {
       this.pushDetection({
         kind: "player_leave",
         label: prev.username,
+        username: prev.username,
+        skinUrl: this.skinFor(prev.username),
         message: `${prev.username} left range (${reason})`,
       });
     }
     this.nearbyPlayers.clear();
+  }
+
+
+  private wirePlayerSkins(bot: Bot, generation: number): void {
+    const client = bot._client;
+    if (!client) return;
+
+    const ingest = (entry: Record<string, unknown>) => {
+      if (generation !== this.joinGeneration) return;
+      // Legacy player_info data[] entries
+      const name =
+        (entry.player as { name?: string } | undefined)?.name ||
+        (entry as { name?: string }).name ||
+        (entry as { username?: string }).username;
+      const props =
+        (entry.player as { properties?: unknown } | undefined)?.properties ||
+        (entry as { properties?: unknown }).properties;
+      const uuid =
+        (entry as { uuid?: string }).uuid ||
+        (entry.player as { id?: string; uuid?: string } | undefined)?.id ||
+        (entry.player as { uuid?: string } | undefined)?.uuid;
+      this.rememberSkin(typeof name === "string" ? name : undefined, props, typeof uuid === "string" ? uuid : undefined);
+    };
+
+    const onPlayerInfo = (packet: Record<string, unknown>) => {
+      if (generation !== this.joinGeneration) return;
+      const data = packet.data;
+      if (Array.isArray(data)) {
+        for (const entry of data) {
+          if (entry && typeof entry === "object") ingest(entry as Record<string, unknown>);
+        }
+      }
+    };
+
+    // Older + some 1.20 builds
+    client.on("player_info", onPlayerInfo);
+    // Some protocol versions / prismarine builds emit alternate names
+    try {
+      (client as { on: (e: string, fn: typeof onPlayerInfo) => void }).on("player_info_v2", onPlayerInfo);
+    } catch {
+      /* ignore */
+    }
+
+    // Mineflayer may already have players after login — harvest properties if present
+    const harvestExisting = () => {
+      if (generation !== this.joinGeneration) return;
+      for (const p of Object.values(bot.players || {})) {
+        const anyP = p as {
+          username?: string;
+          uuid?: string;
+          textureProperties?: unknown;
+          properties?: unknown;
+          skinData?: { url?: string };
+        };
+        if (anyP.skinData?.url && anyP.username) {
+          this.playerSkinUrls.set(anyP.username.toLowerCase(), anyP.skinData.url);
+          continue;
+        }
+        this.rememberSkin(anyP.username, anyP.textureProperties || anyP.properties, anyP.uuid);
+      }
+    };
+    setTimeout(harvestExisting, 500);
+    setTimeout(harvestExisting, 2500);
   }
 
   private wireDetection(bot: Bot, generation: number): void {
@@ -722,6 +835,8 @@ export class FractalBot extends EventEmitter {
       this.pushDetection({
         kind: "player_enter",
         label: username,
+        username,
+        skinUrl: this.skinFor(username),
         message: `${username} entered range${dist != null ? ` (${dist}m)` : ""}`,
         position: pos,
         distance: dist,
@@ -737,6 +852,8 @@ export class FractalBot extends EventEmitter {
       this.pushDetection({
         kind: "player_leave",
         label: username,
+        username,
+        skinUrl: this.skinFor(username),
         message: `${username} left range`,
       });
       void fallbackName;
@@ -1076,6 +1193,7 @@ export class FractalBot extends EventEmitter {
     this.serverPortalsEntered = 0;
     this.worldKind = "unknown";
     this.startedAt = Date.now();
+    this.playerSkinUrls.clear();
     this.setPhase("connecting");
 
     const host = this.currentHost();
@@ -1195,6 +1313,10 @@ export class FractalBot extends EventEmitter {
     bot.on("message", (jsonMsg) => emitChatLine(jsonMsg));
 
     this.wireDetection(bot, generation);
+
+    // Capture skins from tab list — works for premium AND cracked (SkinRestorer / custom URLs)
+    this.wirePlayerSkins(bot, generation);
+
 
     bot.once("login", () => {
       if (generation !== this.joinGeneration) return;

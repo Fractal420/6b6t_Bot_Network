@@ -5,7 +5,7 @@
     "username": "SUM_Slave_Bot",
     "password": "v2co5zWtrsCUe",
     "auth": "offline",
-    "enabled": false,
+    "enabled": true,
     "features": {
       "online": true,
       "hunt": false,
@@ -27,13 +27,7 @@
         "x2": 24000,
         "z2": 24000
       },
-      "mapAutoStart": false,
-      "detectionRecheckMs": 3000,
-      "detectionPlayers": true,
-      "detectionCrystals": true,
-      "detectionTnt": true,
-      "detectionExplosions": true,
-      "detectionCombat": true
+      "mapAutoStart": false
     }
   }
 }
