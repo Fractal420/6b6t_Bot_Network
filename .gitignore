@@ -14,3 +14,6 @@ auth_cache/
 output/
 .idea/
 .vscode/
+Settings/Profiles/
+Settings/announcements.json
+Settings/settings.json
