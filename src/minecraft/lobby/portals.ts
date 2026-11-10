@@ -127,13 +127,16 @@ export function pickServerPortal(
   portals: PortalTarget[],
   worldKind: WorldKind,
   allowServerPortals: boolean,
+  botPos?: { x: number; y: number; z: number },
 ): PortalTarget | null {
   const classified = classifyPortals(portals, worldKind, allowServerPortals);
   const servers = classified.filter((portal) => portal.kind === "server" && portal.blockName === "nether_portal");
   if (servers.length === 0) return null;
 
   const clusters = clusterTouching(servers);
-  // Prefer strict vanilla 2×3 interiors; fall back to any nether_portal cluster (6b6t layouts vary)
+  // Prefer strict vanilla 2×3 interiors; fall back to any nether_portal cluster.
+  // The current second lobby portal is a large custom wall, so we must accept
+  // oversized clusters — otherwise the bot never targets it.
   let chosen = clusters.filter(isNormalVanillaPortal);
   if (chosen.length === 0) chosen = clusters.filter((c) => c.length >= 2);
   if (chosen.length === 0) chosen = clusters;
@@ -141,13 +144,52 @@ export function pickServerPortal(
   const clusterPortals = chosen[0];
   if (!clusterPortals?.length) return null;
 
-  const cx = average(clusterPortals.map((p) => p.position.x + 0.5));
-  const cy = average(clusterPortals.map((p) => p.position.y + 0.5));
-  const cz = average(clusterPortals.map((p) => p.position.z + 0.5));
+  // Bounding box of the cluster
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (const p of clusterPortals) {
+    minX = Math.min(minX, p.position.x);
+    maxX = Math.max(maxX, p.position.x);
+    minY = Math.min(minY, p.position.y);
+    maxY = Math.max(maxY, p.position.y);
+    minZ = Math.min(minZ, p.position.z);
+    maxZ = Math.max(maxZ, p.position.z);
+  }
+
+  const cx = (minX + maxX) / 2 + 0.5;
+  const cy = (minY + maxY) / 2 + 0.5;
+  const cz = (minZ + maxZ) / 2 + 0.5;
+  const spanX = maxX - minX;
+  const spanZ = maxZ - minZ;
+
+  // For thick/large walls: aim at the face nearest the bot instead of the
+  // geometric centre (which can sit inside the wall or on the far side).
+  let tx = cx;
+  let ty = cy;
+  let tz = cz;
+  if (botPos && (spanX >= 2 || spanZ >= 2 || clusterPortals.length >= 8)) {
+    // Prefer the thinner axis as the "depth" of the portal wall
+    if (spanX <= spanZ) {
+      // Wall is mostly in Z — faces are on ±X
+      tx = botPos.x < cx ? minX + 0.5 : maxX + 0.5;
+      // Keep Y in the lower-middle of the opening (easier to walk into)
+      ty = minY + Math.min(2.0, (maxY - minY) * 0.4) + 0.5;
+    } else {
+      // Wall is mostly in X — faces are on ±Z
+      tz = botPos.z < cz ? minZ + 0.5 : maxZ + 0.5;
+      ty = minY + Math.min(2.0, (maxY - minY) * 0.4) + 0.5;
+    }
+  }
+
+  const dist = botPos
+    ? Math.hypot(botPos.x - tx, botPos.y - ty, botPos.z - tz)
+    : minDistance(clusterPortals);
+
   return {
     ...clusterPortals[0],
-    position: { x: cx, y: cy, z: cz },
-    distance: minDistance(clusterPortals),
+    position: { x: tx, y: ty, z: tz },
+    distance: dist,
   };
 }
 

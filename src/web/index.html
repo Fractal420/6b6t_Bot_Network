@@ -433,26 +433,6 @@
           </div>
         </div>
 
-        <div class="card-block dashboard-prefs">
-          <h3 class="subhead">3D terrain view</h3>
-          <p class="hint">This browser only — not stored in profile files.</p>
-          <label class="task-toggle on" id="view3d-toggle-row">
-            <input type="checkbox" id="toggle-view3d" checked />
-            <span class="tt-text">
-              <strong>Enable 3D view</strong>
-              <small>Fetches block mesh · off = zero terrain traffic</small>
-            </span>
-          </label>
-          <label class="settings-row view3d-quality-row">
-            Quality
-            <select id="view3d-quality">
-              <option value="lite" selected>Lite (low data · default)</option>
-              <option value="full">Full (more detail)</option>
-            </select>
-          </label>
-          <p class="hint" id="view3d-state">3D on · lite</p>
-        </div>
-
         <div class="card-block">
           <h3 class="subhead">Process (control API)</h3>
           <p class="hint" id="settings-path">Settings/settings.json — applies to the whole bot process</p>
@@ -666,11 +646,17 @@
         </div>
         <p class="survey-meta" id="survey-meta">no terrain yet</p>
         <div class="survey-tools">
-          <button type="button" class="rad" data-r="14">14m</button>
+          <button type="button" id="survey-3d-off" class="view3d-btn" title="Stop fetching terrain (saves data)">3D off</button>
+          <button type="button" id="survey-3d-on" class="view3d-btn on" title="Show live terrain around the bot">3D on</button>
+          <span class="survey-tools-sep" aria-hidden="true"></span>
+          <button type="button" class="rad" data-r="12">12m</button>
+          <button type="button" class="rad" data-r="16">16m</button>
           <button type="button" class="rad on" data-r="20">20m</button>
           <button type="button" class="rad" data-r="28">28m</button>
-          <button type="button" id="survey-follow">follow</button>
-          <button type="button" id="survey-orbit" class="on">orbit</button>
+          <button type="button" class="rad" data-r="40">40m</button>
+          <span class="survey-tools-sep" aria-hidden="true"></span>
+          <button type="button" id="survey-follow" class="on">follow</button>
+          <button type="button" id="survey-orbit">orbit</button>
         </div>
       </div>
       <div class="survey-stage">

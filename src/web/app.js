@@ -338,7 +338,7 @@ function renderStatus(data) {
   updateProfileSelectorUI();
 
   if (data.position && isView3dPrefEnabled() && isBotLiveForView()) {
-    window.fractalSurvey?.setBot(data.position, data.yaw, data.username);
+    window.fractalSurvey?.setBot(data.position, data.yaw, data.username, data.pitch);
   }
   applyView3dState();
 }
@@ -1629,29 +1629,25 @@ function isBotLiveForView() {
 }
 
 function applyView3dState() {
-  const want = isView3dPrefEnabled() && isBotLiveForView();
+  const prefOn = isView3dPrefEnabled();
+  const want = prefOn && isBotLiveForView();
   const shared = document.getElementById("survey-shared");
   if (shared) {
-    // Keep in DOM but dim when off so layout does not jump hard
+    // Only hide the canvas stage when off — toolbar + gamepad stay usable
     shared.classList.toggle("view3d-off", !want);
-    shared.setAttribute("aria-hidden", want ? "false" : "true");
   }
   try {
     window.fractalSurvey?.setEnabled?.(want);
   } catch {
     /* survey may not be ready */
   }
-  const toggle = document.getElementById("toggle-view3d");
-  if (toggle) {
-    toggle.checked = isView3dPrefEnabled();
-    toggle.closest(".task-toggle")?.classList.toggle("on", toggle.checked);
-  }
-  const badge = document.getElementById("view3d-state");
-  if (badge) {
-    if (!isView3dPrefEnabled()) badge.textContent = "3D off (settings)";
-    else if (!isBotLiveForView()) badge.textContent = "3D paused (offline)";
-    else badge.textContent = `3D on · ${getView3dQuality()}`;
-  }
+  const onBtn = document.getElementById("survey-3d-on");
+  const offBtn = document.getElementById("survey-3d-off");
+  if (onBtn) onBtn.classList.toggle("on", prefOn);
+  if (offBtn) offBtn.classList.toggle("on", !prefOn);
+  const meta = document.getElementById("survey-meta");
+  if (meta && !prefOn) meta.textContent = "3D off · gamepad still works";
+  else if (meta && prefOn && !isBotLiveForView()) meta.textContent = "3D paused · bot offline";
 }
 
 async function refreshVoxels() {
@@ -1662,11 +1658,10 @@ async function refreshVoxels() {
     return;
   }
   try {
-    const quality = getView3dQuality();
-    const r =
-      quality === "lite"
-        ? Math.min(12, window.fractalSurvey.radius ?? 12)
-        : window.fractalSurvey.radius ?? 20;
+    // Use the radius the user picked on the 3D toolbar (12 / 16 / 20 / 28 / 40)
+    const r = Math.max(4, Math.min(48, Number(window.fractalSurvey.radius) || 20));
+    // "full" mesh when radius is larger so far blocks still look OK
+    const quality = r >= 24 ? "full" : getView3dQuality();
     const qs = new URLSearchParams();
     qs.set("r", String(r));
     qs.set("q", quality);
@@ -1763,10 +1758,26 @@ function connectEvents() {
   });
 }
 
+async function syncBotLookToView() {
+  // Point the bot the same way as the on-screen camera so forward/back/left/right
+  // are always relative to where the user is looking (not a stale entity yaw).
+  try {
+    const moving = keys.forward || keys.back || keys.left || keys.right;
+    if (!moving) return;
+    window.fractalSurvey?.ensureFollow?.();
+    const look = window.fractalSurvey?.getLook?.();
+    if (!look || typeof look.yaw !== "number") return;
+    await rpc("look", { yaw: look.yaw, pitch: look.pitch ?? 0, force: true });
+  } catch {
+    /* survey / bot may not be ready */
+  }
+}
+
 async function sendControl() {
   const packed = JSON.stringify(keys);
   if (packed === lastControl) return;
   lastControl = packed;
+  await syncBotLookToView();
   await rpc("control", { state: keys });
 }
 
@@ -1801,7 +1812,7 @@ window.__fractalControlsActive = false;
         const body = await rpc("status", {});
         const data = body?.data;
         if (data?.position) {
-          window.fractalSurvey?.setBot?.(data.position, data.yaw, data.username);
+          window.fractalSurvey?.setBot?.(data.position, data.yaw, data.username, data.pitch);
         }
       } catch {
         /* ignore transient */
@@ -1878,8 +1889,9 @@ window.__fractalControlsActive = false;
     const raw = el.getAttribute("data-turn") || "0,0";
     const [yawS, pitchS] = raw.split(",");
     // Smaller steps at higher rate ≈ same turn speed, much smoother
+    // Pitch gets a slightly higher scale so look up/down feels as strong as left/right
     const yaw = (Number(yawS) || 0) * 0.42;
-    const pitch = (Number(pitchS) || 0) * 0.42;
+    const pitch = (Number(pitchS) || 0) * 0.55;
     bindHold(
       el,
       () => {
@@ -1890,13 +1902,18 @@ window.__fractalControlsActive = false;
           /* ignore */
         }
         const tick = () => {
-          // Instant local camera response
+          // Instant local camera response (yaw + pitch)
           try {
             window.fractalSurvey?.nudgeLook?.(yaw, pitch);
           } catch {
             /* ignore */
           }
           void rpc("turn", { yaw, pitch });
+          // If the user is already holding a move key, re-sync facing so
+          // strafe/forward stay aligned with the new look direction.
+          if (keys.forward || keys.back || keys.left || keys.right) {
+            void syncBotLookToView();
+          }
         };
         tick();
         const id = setInterval(tick, LOOK_INTERVAL_MS);
@@ -2408,18 +2425,14 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refresh({ force: true });
 });
 
-document.getElementById("toggle-view3d")?.addEventListener("change", (e) => {
-  setView3dPref(Boolean(e.target.checked));
-  if (e.target.checked) void refreshVoxels();
+// 3D on/off lives on the survey toolbar (not Settings)
+document.getElementById("survey-3d-on")?.addEventListener("click", () => {
+  setView3dPref(true);
+  void refreshVoxels();
 });
-document.getElementById("view3d-quality")?.addEventListener("change", (e) => {
-  setView3dQuality(e.target.value);
+document.getElementById("survey-3d-off")?.addEventListener("click", () => {
+  setView3dPref(false);
 });
-// Sync quality select on load
-{
-  const sel = document.getElementById("view3d-quality");
-  if (sel) sel.value = getView3dQuality();
-}
 
 // Notifications + service worker (captcha alerts on phone / background tab)
 updateNotifyChip();

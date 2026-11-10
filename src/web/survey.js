@@ -771,12 +771,13 @@ void main() {
     }
   }
 
-  function setBot(pos, heading, name) {
+  function setBot(pos, heading, name, botPitch) {
     if (!pos) return;
     const prev = bot;
     const jump =
       prev &&
       Math.hypot(pos.x - prev.x, pos.y - prev.y, pos.z - prev.z) > 32;
+    const pitchVal = typeof botPitch === "number" && Number.isFinite(botPitch) ? botPitch : prev?.pitch ?? 0;
     bot = {
       name: name || bot?.name || "unknown",
       kind: "bot",
@@ -784,6 +785,7 @@ void main() {
       y: pos.y,
       z: pos.z,
       yaw: heading,
+      pitch: pitchVal,
     };
     // If prediction is close to the real heading, snap prediction to it so we don't drift
     if (predYaw != null && typeof heading === "number") {
@@ -791,6 +793,9 @@ void main() {
       while (d > Math.PI) d -= Math.PI * 2;
       while (d < -Math.PI) d += Math.PI * 2;
       if (Math.abs(d) < 0.35) predYaw = heading;
+    }
+    if (predPitch != null && typeof pitchVal === "number") {
+      if (Math.abs(predPitch - pitchVal) < 0.25) predPitch = pitchVal;
     }
     if (setOriginNear(pos.x, pos.y, pos.z) && field) rebuildVoxelInstances();
     if (!seeded || jump) {
@@ -804,9 +809,9 @@ void main() {
   function nudgeLook(dyaw, dpitch) {
     if (mode !== "follow") return;
     if (predYaw == null) predYaw = bot?.yaw ?? 0;
-    if (predPitch == null) predPitch = 0;
+    if (predPitch == null) predPitch = bot?.pitch ?? 0;
     predYaw += dyaw;
-    predPitch = Math.max(-1.4, Math.min(1.4, predPitch + dpitch));
+    predPitch = Math.max(-1.45, Math.min(1.45, predPitch + dpitch));
     scheduleDraw();
   }
 
@@ -827,6 +832,17 @@ void main() {
     syncModeButtons();
     notifyKeyOwner();
     scheduleDraw();
+  }
+
+  /**
+   * Current view facing (radians), matching mineflayer yaw/pitch.
+   * Prefer local look prediction while the user is turning so Move
+   * forward/left/right/back always match what is on screen.
+   */
+  function getLook() {
+    const yaw = predYaw != null ? predYaw : bot?.yaw ?? 0;
+    const pitch = predPitch != null ? predPitch : bot?.pitch ?? 0;
+    return { yaw, pitch, mode };
   }
 
   function setPlayers(list) {
@@ -1160,18 +1176,40 @@ void main() {
     } else if (mode === "follow") {
       // Prefer predicted look while the user is actively turning (instant feel)
       const useYaw = predYaw != null ? predYaw : bot.yaw || 0;
+      // Minecraft pitch: negative = look up, positive = look down
+      const usePitch = predPitch != null ? predPitch : bot.pitch || 0;
+      // Mineflayer / prismarine yaw: 0 = north (-Z), π/2 = west (-X).
+      // Forward unit vector must match setControlState("forward"):
+      //   fx = -sin(yaw), fz = -cos(yaw)
+      // (Previously fz = +cos(yaw) which pointed the camera south when the bot
+      // faced north — so Move ▲ walked opposite to the view.)
       const fx = -Math.sin(useYaw);
-      const fz = Math.cos(useYaw);
-      // Tighter third-person so direction of travel is obvious on phone
-      const dist = 9;
-      const height = 4.2;
-      const targetEye = [bx - fx * dist, by + height, bz - fz * dist];
-      // Smooth eye position a bit so it doesn't jump when status updates
-      const k = Math.min(1, dt * 12);
+      const fz = -Math.cos(useYaw);
+      // Over-the-shoulder: camera behind bot, looking the same way the bot looks
+      // so look-up / look-down actually tilts the view
+      const dist = 8;
+      const baseHeight = 3.6;
+      // Raise camera a bit when looking down, lower when looking up (keeps subject framed)
+      const pitchLift = usePitch * 2.2;
+      const targetEye = [
+        bx - fx * dist,
+        by + baseHeight + pitchLift,
+        bz - fz * dist,
+      ];
+      const k = Math.min(1, dt * 14);
       eye[0] += (targetEye[0] - eye[0]) * k;
       eye[1] += (targetEye[1] - eye[1]) * k;
       eye[2] += (targetEye[2] - eye[2]) * k;
-      lookToward(bx, by + 1.35, bz);
+
+      // Aim a point in front of the bot along its look direction
+      const lookAhead = 14;
+      const cp = Math.cos(usePitch);
+      const sp = Math.sin(usePitch);
+      // forward horizontal * cos(pitch), vertical = -sin(pitch) in MC coords
+      const tx = bx + fx * lookAhead * cp;
+      const ty = by + 1.4 - sp * lookAhead;
+      const tz = bz + fz * lookAhead * cp;
+      lookToward(tx, ty, tz);
     }
   }
 
@@ -1315,6 +1353,7 @@ void main() {
     nudgeLook,
     clearLookPrediction,
     ensureFollow,
+    getLook,
     get enabled() {
       return enabled;
     },

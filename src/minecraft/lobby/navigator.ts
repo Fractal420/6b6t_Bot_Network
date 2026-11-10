@@ -23,8 +23,11 @@ export interface PortalNavigator {
 const KNOWN_SERVER_PORTALS = [
   { x: -1000, y: 102, z: -988 },
   { x: 311, y: 163.5, z: 427 },
+  // Current (Nov 2026) second lobby portal area — large custom structure
+  { x: 242, y: 64.5, z: 221 },
   { x: 245, y: 67, z: 220 },
   { x: 250, y: 65, z: 225 },
+  { x: 238, y: 64, z: 220 },
 ];
 
 function sleep(ms: number): Promise<void> {
@@ -37,12 +40,19 @@ function inPortalBlock(bot: Bot): boolean {
   const yaw = bot.entity.yaw;
   const fx = -Math.sin(yaw);
   const fz = -Math.cos(yaw);
+  // Sample feet, body, head, and a step forward at multiple heights —
+  // the second lobby portal sits ~2 blocks above ground level.
   const samples = [
     pos.floored(),
     pos.offset(0, 1, 0).floored(),
+    pos.offset(0, 1.5, 0).floored(),
+    pos.offset(0, 2, 0).floored(),
     pos.offset(0, 0.5, 0).floored(),
     pos.offset(fx, 0, fz).floored(),
     pos.offset(fx, 1, fz).floored(),
+    pos.offset(fx, 1.5, fz).floored(),
+    pos.offset(fx, 2, fz).floored(),
+    pos.offset(fx * 0.5, 1, fz * 0.5).floored(),
   ];
   return samples.some((p) => {
     const name = bot.blockAt(p)?.name;
@@ -99,21 +109,29 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
 
     // Fast portal find — no pathfinder, pure sprint
     const raw = findPortalBlocks(bot, 72, 1024);
-    let portal = pickServerPortal(raw, worldKind, true);
+    let portal = pickServerPortal(raw, worldKind, true, {
+      x: pos.x,
+      y: pos.y,
+      z: pos.z,
+    });
     if (!portal) {
-      // Last resort: cluster remaining nether_portal blocks and aim at their
-      // middle (never a single edge block — that is how bots get stuck on
-      // the side of the large second lobby portal).
+      // Last resort: nearest nether_portal block, offset slightly toward the
+      // bot so we never aim at the far side of a thick wall.
       const nether = raw.filter((p) => p.blockName === "nether_portal");
       if (nether.length > 0) {
-        const cx = nether.reduce((s, p) => s + p.position.x + 0.5, 0) / nether.length;
-        const cy = nether.reduce((s, p) => s + p.position.y + 0.5, 0) / nether.length;
-        const cz = nether.reduce((s, p) => s + p.position.z + 0.5, 0) / nether.length;
-        const nearest = nether.sort((a, b) => a.distance - b.distance)[0];
+        nether.sort((a, b) => a.distance - b.distance);
+        const nearest = nether[0];
+        const dx = pos.x - (nearest.position.x + 0.5);
+        const dz = pos.z - (nearest.position.z + 0.5);
+        const len = Math.hypot(dx, dz) || 1;
         portal = {
           ...nearest,
           kind: "server",
-          position: { x: cx, y: cy, z: cz },
+          position: {
+            x: nearest.position.x + 0.5 + (dx / len) * 0.6,
+            y: nearest.position.y + 0.5,
+            z: nearest.position.z + 0.5 + (dz / len) * 0.6,
+          },
           distance: nearest.distance,
         };
       }
@@ -153,10 +171,8 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
 
     const startPos = bot.entity.position.clone();
     const startDim = String(bot.game?.dimension ?? "");
-    // pickServerPortal already returns the geometric center of the portal cluster
-    // (block centers averaged). Integer coords come from single-block / known-spot
-    // fallbacks — snap those to block center. Never add 0.5 twice or the bot
-    // aims at the side of large second portals and gets stuck on the frame.
+    // Target is already the nearest face of the portal (or a known spot).
+    // Integer coords come from known-spot fallbacks — snap those to block center.
     const px = portal.position.x;
     const py = portal.position.y;
     const pz = portal.position.z;
@@ -165,15 +181,33 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
       Number.isInteger(py) ? py + 0.5 : py,
       Number.isInteger(pz) ? pz + 0.5 : pz,
     );
+
+    // Estimate how big the portal cluster is so we can push further through
+    // large second-lobby portals (they are not vanilla 2×3).
+    const netherNear = raw.filter(
+      (p) => p.blockName === "nether_portal" && p.distance < (portal.distance + 12),
+    );
+    const isLargePortal = netherNear.length >= 8;
+    const pastDist = isLargePortal ? 12 : 6;
+
     const flat = new Vec3(target.x - startPos.x, 0, target.z - startPos.z);
     const fl = Math.hypot(flat.x, flat.z) || 1;
-    // Aim well past the middle so we walk straight through the opening
-    const past = new Vec3(target.x + (flat.x / fl) * 6, target.y, target.z + (flat.z / fl) * 6);
+    // Aim well past the face so we walk straight through the opening
+    const past = new Vec3(
+      target.x + (flat.x / fl) * pastDist,
+      target.y,
+      target.z + (flat.z / fl) * pastDist,
+    );
 
-    const deadline = Date.now() + 14_000;
+    // Prefer a lower look height on large portals so we hit the walkable part
+    // of the opening instead of the upper frame / crying_obsidian lip.
+    const lookYOffset = isLargePortal ? 0.4 : 1.0;
+
+    const deadline = Date.now() + (isLargePortal ? 22_000 : 14_000);
     let lastMoveCheck = Date.now();
     let lastMovePos = startPos.clone();
     let stuckBoosts = 0;
+    let chargeUntil = 0;
 
     while (Date.now() < deadline && !stopped) {
       if (!bot.entity) break;
@@ -185,45 +219,74 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
         return true;
       }
 
-      // Always face the middle of the portal and a point past it so we walk
-      // straight through the opening instead of grazing the side.
-      void bot.lookAt(new Vec3(past.x, here.y + 1.0, past.z), true).catch(() => {});
+      const dist = Math.hypot(here.x - target.x, here.z - target.z);
+      const belowPortal = here.y < target.y - 0.3;
+      const inside = inPortalBlock(bot);
+
+      // Look at a point past the face. When below the portal, aim upward so
+      // the bot jumps into the purple blocks instead of the bottom frame.
+      const lookY = belowPortal
+        ? Math.max(here.y + 1.6, target.y + 0.5)
+        : here.y + lookYOffset;
+      void bot.lookAt(new Vec3(past.x, lookY, past.z), true).catch(() => {});
 
       bot.setControlState("forward", true);
       bot.setControlState("sprint", true);
 
-      const dist = Math.hypot(here.x - target.x, here.z - target.z);
-      const inside = inPortalBlock(bot);
+      // Height is the main problem on the second lobby portal: portal blocks
+      // sit at ~Y64 while the bot stands at ~Y62. Hold jump the whole time
+      // we are close and still below the opening.
+      const needJump =
+        inside ||
+        Date.now() < chargeUntil ||
+        (dist < (isLargePortal ? 9 : 5) && (belowPortal || isLargePortal));
 
-      // Close or inside: jump-burst through frame (obsidian lip)
-      if (dist < 5 || inside) {
+      if (needJump) {
         bot.setControlState("jump", true);
-        await sleep(50);
+        if (inside || (dist < 3 && belowPortal)) {
+          chargeUntil = Date.now() + 1200;
+        }
+      } else {
         bot.setControlState("jump", false);
       }
 
-      // Stuck detector: not moving for 700ms while holding forward
-      if (Date.now() - lastMoveCheck > 700) {
-        if (here.distanceTo(lastMovePos) < 0.35) {
+      // Stuck detector — very aggressive when we are under the portal lip
+      if (Date.now() - lastMoveCheck > 500) {
+        if (here.distanceTo(lastMovePos) < 0.5) {
           stuckBoosts += 1;
-          log.info(`Portal approach stuck (boost ${stuckBoosts}) — re-center + jump/strafe`);
-          // Re-aim hard at the portal middle, not the side we drifted into
-          void bot.lookAt(new Vec3(past.x, here.y + 1.0, past.z), true).catch(() => {});
+          log.info(
+            `Portal approach stuck (boost ${stuckBoosts}${isLargePortal ? ", large" : ""}${belowPortal ? ", low" : ""}) y=${here.y.toFixed(1)} → re-center + jump`,
+          );
+          void bot.lookAt(new Vec3(past.x, lookY, past.z), true).catch(() => {});
+
+          // Back up a step so we get a clean run-up, then charge with jump
+          bot.setControlState("forward", false);
+          bot.setControlState("back", true);
           bot.setControlState("jump", true);
+          await sleep(belowPortal ? 220 : 140);
+          bot.setControlState("back", false);
+          bot.setControlState("forward", true);
+
+          // Strafe to slide off the frame edge
           bot.setControlState(stuckBoosts % 2 === 0 ? "left" : "right", true);
-          await sleep(140);
+          await sleep(isLargePortal ? 200 : 120);
           bot.setControlState("left", false);
           bot.setControlState("right", false);
-          bot.setControlState("jump", false);
+
+          // After recovery, force a long jump-sprint charge
+          chargeUntil = Date.now() + (belowPortal ? 1600 : 1100);
+          bot.setControlState("jump", true);
         }
         lastMoveCheck = Date.now();
         lastMovePos = here.clone();
       }
 
-      await sleep(50);
+      await sleep(30);
     }
 
     stopMovement();
+    // Only count the enter once — the in-loop hasTransferred path already
+    // called onEntered when it returned true earlier.
     if (bot.entity && hasTransferred(startPos, startDim)) {
       hooks.onEntered(portal);
       return true;
@@ -241,8 +304,11 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
       const ok = await huntOnce();
       if (gen !== loopGen) break;
       if (ok) {
-        // Immediately look for next portal (second portal) — minimal pause
-        await sleep(400);
+        // Real portal hop — wait for Velocity transfer + world reclassify
+        // before hunting the next portal. A short pause let overlapping hunts
+        // all count the same transfer (1/2 → 7/2) and skip the second portal.
+        stopMovement();
+        await sleep(2500);
         continue;
       }
       const waitMs = Math.min(Math.max(retryMs, 1500), 3000);

@@ -1257,9 +1257,20 @@ export class FractalBot extends EventEmitter {
       }, 3500);
     });
 
+    let lastPortalEnterAt = 0;
     this.navigator = createPortalNavigator(bot, this.config.portalRetryMs, {
       onFound: (portal) => this.emit("portalFound", portal),
       onEntered: (portal) => {
+        // Velocity transfers fire multiple configuration/play transitions and
+        // overlapping hunt loops can all see hasTransferred=true. Debounce so
+        // one real portal hop only counts once (otherwise 1/2 jumps to 7/2 and
+        // the second lobby portal is never hunted).
+        const now = Date.now();
+        if (now - lastPortalEnterAt < 4000) {
+          log.info(`Ignoring duplicate portal-enter event (${now - lastPortalEnterAt}ms after last)`);
+          return;
+        }
+        lastPortalEnterAt = now;
         this.serverPortalsEntered += 1;
         this.emit("portalEntered", { kind: portal.kind, count: this.serverPortalsEntered });
         log.info(`Entered server portal ${this.serverPortalsEntered}/${this.config.requiredServerPortals}`);
@@ -1274,7 +1285,15 @@ export class FractalBot extends EventEmitter {
               /* ignore */
             }
           }
-        }, 800);
+          // After first portal, force a fresh hunt for the second lobby portal
+          if (
+            this.autoLobby &&
+            this.serverPortalsEntered < this.config.requiredServerPortals &&
+            !isMainWorld(this.worldKind)
+          ) {
+            this.navigator?.start();
+          }
+        }, 1200);
       },
       onMiss: (reason) => {
         if (!this.autoLobby) return;

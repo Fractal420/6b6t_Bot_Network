@@ -3000,20 +3000,20 @@ button.primary,
 .survey-shared[hidden] { display: none !important; }
 .survey-shared { display: block; }
 .survey-slot .survey-shared { margin: 0; }
-.survey-shared.view3d-off {
-  opacity: 0.45;
-  filter: grayscale(0.35);
-  pointer-events: none;
-}
+/* 3D off: hide canvas only — toolbar + gamepad stay interactive */
 .survey-shared.view3d-off .survey-stage {
-  min-height: 8rem;
+  display: none;
 }
-.dashboard-prefs {
-  margin-bottom: 1rem;
+.survey-shared.view3d-off #survey-meta {
+  opacity: 0.55;
 }
-.dashboard-prefs .task-toggle {
-  width: 100%;
-  margin: 0.5rem 0;
+.survey-tools-sep {
+  display: inline-block;
+  width: 1px;
+  height: 1.1rem;
+  margin: 0 0.25rem;
+  background: var(--line, rgba(255, 255, 255, 0.18));
+  vertical-align: middle;
 }
 
 
