@@ -1772,18 +1772,64 @@ async function sendControl() {
 
 
 /* On-screen gamepad (under 3D view) — hold movement mods, press actions */
+// Shared so voxel poll can speed up while the user is actively steering
+window.__fractalControlsActive = false;
+
 (function bindGamepad() {
+  // Track active look so we can keep the camera in sync and poll pose faster
+  let activeLookCount = 0;
+  let posePollTimer = null;
+
+  const anyControlActive = () =>
+    activeLookCount > 0 || Object.values(keys).some(Boolean);
+
+  const markActive = () => {
+    window.__fractalControlsActive = anyControlActive();
+  };
+
+  const startPosePoll = () => {
+    if (posePollTimer) return;
+    const tick = async () => {
+      if (!anyControlActive()) {
+        if (posePollTimer) {
+          clearInterval(posePollTimer);
+          posePollTimer = null;
+        }
+        return;
+      }
+      try {
+        const body = await rpc("status", {});
+        const data = body?.data;
+        if (data?.position) {
+          window.fractalSurvey?.setBot?.(data.position, data.yaw, data.username);
+        }
+      } catch {
+        /* ignore transient */
+      }
+    };
+    void tick();
+    posePollTimer = setInterval(tick, 90);
+  };
+
   const pressKey = (control, down) => {
     if (!control || !(control in keys)) return;
     if (down) {
       if (keys[control]) return;
       keys[control] = true;
       document.querySelectorAll(`[data-k="${control}"]`).forEach((el) => el.classList.add("down"));
+      // Always drive the bot relative to the view the user is seeing
+      try {
+        window.fractalSurvey?.ensureFollow?.();
+      } catch {
+        /* survey may not be ready */
+      }
+      startPosePoll();
     } else {
       if (!keys[control]) return;
       keys[control] = false;
       document.querySelectorAll(`[data-k="${control}"]`).forEach((el) => el.classList.remove("down"));
     }
+    markActive();
     void sendControl();
   };
 
@@ -1825,27 +1871,52 @@ async function sendControl() {
     );
   });
 
-  // Look — hold to keep turning
+  // Look — hold to keep turning (faster ticks + local prediction for smooth feel)
   const lookTimers = new Map();
+  const LOOK_INTERVAL_MS = 45;
   document.querySelectorAll("#gamepad [data-turn]").forEach((el) => {
     const raw = el.getAttribute("data-turn") || "0,0";
     const [yawS, pitchS] = raw.split(",");
-    const yaw = Number(yawS) || 0;
-    const pitch = Number(pitchS) || 0;
+    // Smaller steps at higher rate ≈ same turn speed, much smoother
+    const yaw = (Number(yawS) || 0) * 0.42;
+    const pitch = (Number(pitchS) || 0) * 0.42;
     bindHold(
       el,
       () => {
+        activeLookCount += 1;
+        try {
+          window.fractalSurvey?.ensureFollow?.();
+        } catch {
+          /* ignore */
+        }
         const tick = () => {
+          // Instant local camera response
+          try {
+            window.fractalSurvey?.nudgeLook?.(yaw, pitch);
+          } catch {
+            /* ignore */
+          }
           void rpc("turn", { yaw, pitch });
         };
         tick();
-        const id = setInterval(tick, 120);
+        const id = setInterval(tick, LOOK_INTERVAL_MS);
         lookTimers.set(el, id);
+        startPosePoll();
+        markActive();
       },
       () => {
+        activeLookCount = Math.max(0, activeLookCount - 1);
         const id = lookTimers.get(el);
         if (id) clearInterval(id);
         lookTimers.delete(el);
+        if (activeLookCount === 0) {
+          try {
+            window.fractalSurvey?.clearLookPrediction?.();
+          } catch {
+            /* ignore */
+          }
+        }
+        markActive();
       },
     );
   });
@@ -1979,6 +2050,12 @@ window.addEventListener("keydown", (event) => {
   if (keys[control]) return;
   keys[control] = true;
   document.querySelectorAll(`[data-k="${control}"]`).forEach((el) => el.classList.add("down"));
+  try {
+    window.fractalSurvey?.ensureFollow?.();
+  } catch {
+    /* ignore */
+  }
+  window.__fractalControlsActive = true;
   void sendControl();
 });
 
@@ -1988,6 +2065,7 @@ window.addEventListener("keyup", (event) => {
   if (!keys[control]) return;
   keys[control] = false;
   document.querySelectorAll(`[data-k="${control}"]`).forEach((el) => el.classList.remove("down"));
+  window.__fractalControlsActive = Object.values(keys).some(Boolean);
   void sendControl();
 });
 
@@ -2310,16 +2388,20 @@ setInterval(() => {
 }, 4000);
 
 // Adaptive voxel poll only when 3D is enabled + bot live
+// While the user is actively steering, refresh much more often so the world keeps up
 let lastVoxelPoll = 0;
 setInterval(() => {
   if (document.hidden) return;
   if (!isView3dPrefEnabled() || !isBotLiveForView()) return;
-  const gap = getView3dQuality() === "full" ? 3000 : 6000;
+  const steering = Boolean(window.__fractalControlsActive);
+  let gap;
+  if (steering) gap = getView3dQuality() === "full" ? 900 : 1400;
+  else gap = getView3dQuality() === "full" ? 3000 : 6000;
   const now = Date.now();
   if (now - lastVoxelPoll < gap) return;
   lastVoxelPoll = now;
   void refreshVoxels();
-}, 1000);
+}, 400);
 
 // Pause work when the tab is backgrounded (saves radio + battery)
 document.addEventListener("visibilitychange", () => {

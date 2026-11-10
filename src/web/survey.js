@@ -640,13 +640,17 @@ void main() {
   let field = null;
   let bot = null;
   let others = [];
-  let mode = "orbit";
+  // Default follow so gamepad forward always matches what you see on screen
+  let mode = "follow";
   let orbitAngle = 0.7;
   let radius = 20;
   /** Camera in *local* space (relative to origin). */
   let eye = [0, 80, 0];
   let yaw = 0;
   let pitch = -0.45;
+  // Predicted yaw/pitch while the user is holding look buttons (smoother than waiting for status)
+  let predYaw = null;
+  let predPitch = null;
   let flying = false;
   let dragging = false;
   let seeded = false;
@@ -781,11 +785,48 @@ void main() {
       z: pos.z,
       yaw: heading,
     };
+    // If prediction is close to the real heading, snap prediction to it so we don't drift
+    if (predYaw != null && typeof heading === "number") {
+      let d = predYaw - heading;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      if (Math.abs(d) < 0.35) predYaw = heading;
+    }
     if (setOriginNear(pos.x, pos.y, pos.z) && field) rebuildVoxelInstances();
     if (!seeded || jump) {
       seedCamera();
       seeded = true;
     }
+    scheduleDraw();
+  }
+
+  /** Instant local camera turn while look buttons are held (prediction). */
+  function nudgeLook(dyaw, dpitch) {
+    if (mode !== "follow") return;
+    if (predYaw == null) predYaw = bot?.yaw ?? 0;
+    if (predPitch == null) predPitch = 0;
+    predYaw += dyaw;
+    predPitch = Math.max(-1.4, Math.min(1.4, predPitch + dpitch));
+    scheduleDraw();
+  }
+
+  /** Clear prediction (e.g. when look buttons released). */
+  function clearLookPrediction() {
+    predYaw = null;
+    predPitch = null;
+  }
+
+  /** Force follow mode so gamepad movement matches the screen. */
+  function ensureFollow() {
+    if (mode === "follow") return;
+    mode = "follow";
+    flying = false;
+    flyKeys.clear();
+    root?.classList.remove("flying");
+    if (document.pointerLockElement === canvas) document.exitPointerLock?.();
+    syncModeButtons();
+    notifyKeyOwner();
+    scheduleDraw();
   }
 
   function setPlayers(list) {
@@ -1117,10 +1158,20 @@ void main() {
       eye = [bx + Math.cos(orbitAngle) * dist, by + 8, bz + Math.sin(orbitAngle) * dist];
       lookToward(bx, by + 1.2, bz);
     } else if (mode === "follow") {
-      const fx = -Math.sin(bot.yaw || 0);
-      const fz = Math.cos(bot.yaw || 0);
-      eye = [bx - fx * 12, by + 5.5, bz - fz * 12];
-      lookToward(bx, by + 1.4, bz);
+      // Prefer predicted look while the user is actively turning (instant feel)
+      const useYaw = predYaw != null ? predYaw : bot.yaw || 0;
+      const fx = -Math.sin(useYaw);
+      const fz = Math.cos(useYaw);
+      // Tighter third-person so direction of travel is obvious on phone
+      const dist = 9;
+      const height = 4.2;
+      const targetEye = [bx - fx * dist, by + height, bz - fz * dist];
+      // Smooth eye position a bit so it doesn't jump when status updates
+      const k = Math.min(1, dt * 12);
+      eye[0] += (targetEye[0] - eye[0]) * k;
+      eye[1] += (targetEye[1] - eye[1]) * k;
+      eye[2] += (targetEye[2] - eye[2]) * k;
+      lookToward(bx, by + 1.35, bz);
     }
   }
 
@@ -1261,11 +1312,17 @@ void main() {
     setEnabled,
     isFlying,
     ownsKeys,
+    nudgeLook,
+    clearLookPrediction,
+    ensureFollow,
     get enabled() {
       return enabled;
     },
     get radius() {
       return radius;
+    },
+    get mode() {
+      return mode;
     },
     resize,
   };
