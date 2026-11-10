@@ -1,8 +1,34 @@
-# Fractal 6b Slave Bot
+# Fractal42O Bot Network
 
-> Original Work: https://github.com/ClapFy/6bBotAPI
+Mineflayer control system for the **6b6t** anarchy server.
 
-Mineflayer control system for the 6b6t anarchy server. Offline-account join, stored `/login`, two server-lobby portals, auto-rejoin, a CLI with tab completion, and an HTTP/WebSocket control API you can plug other UIs into.
+Offline-account join with stored `/login`, dual-portal lobby navigation, auto-rejoin with captcha handling, multi-account fleet, elytra terrain mapping (Xaero regions), a CLI with tab completion, a web dashboard, and an HTTP/WebSocket control API.
+
+> Made by **Fractal42O** for the **6b6t** community.
+
+---
+
+## Features
+
+- **Offline join** — credentials in `Settings/`; password is never prompted at runtime
+- **Lobby navigation** — auto-walk the two server portals out of the lobby
+- **Auto-reconnect** — exponential backoff; longer cooldown (or halt) on captcha / rate-limit kicks
+- **Captcha alerts** — browser notifications + optional Discord mirror
+- **CLI** — join, chat, movement, inventory, map, hunt, shell with tab completion
+- **Web dashboard** — cyberpunk control UI (fleet, live view, settings, activity log)
+- **Control API** — HTTP + WebSocket RPC for external tools / UIs
+- **Fleet** — multiple accounts with per-bot features: online, hunt, map, announcements, anti-AFK
+- **Elytra mapper** — flight + Xaero region writer (box / spawn / ring / direction modes)
+- **Optional Discord** — remote `!status`, `!chat`, `!map`, etc.
+
+---
+
+## Requirements
+
+- **Node.js ≥ 20**
+- Offline Minecraft account that can join 6b6t (or Microsoft auth if configured)
+
+---
 
 ## Setup
 
@@ -10,15 +36,15 @@ Mineflayer control system for the 6b6t anarchy server. Offline-account join, sto
 npm install
 ```
 
-All configuration lives under **`Settings/`**:
+Configuration lives under **`Settings/`**:
 
 | Path | Purpose |
 |------|---------|
-| `Settings/settings.json` | Global knobs (host, control API, reconnect, map, Discord, …) |
-| `Settings/Profiles/<id>.json` | **One file per account profile** (credentials + features + overrides) |
-| `Settings/announcements.json` | Default chat announcements |
+| `Settings/settings.json` | Global options (host, control API, reconnect, map, Discord, …) |
+| `Settings/Profiles/<id>.json` | One file per account (credentials + features + overrides) |
+| `Settings/announcements.json` | Default timed chat messages |
 
-On first run, a legacy `.env` / `accounts.json` is migrated automatically if present. Edit via the dashboard **Settings** panel or the JSON files directly.
+On first run, a legacy `.env` / `accounts.json` is migrated if present.
 
 Minimal `Settings/settings.json`:
 
@@ -32,156 +58,60 @@ Minimal `Settings/settings.json`:
     "MC_PASSWORD": "...",
     "MC_AUTH": "offline",
     "CONTROL_HOST": "127.0.0.1",
-    "CONTROL_PORT": "37637",
+    "CONTROL_PORT": "20972",
     "SERVER_PORTALS": "2"
   }
 }
 ```
 
-Optionally install the CLI on your PATH:
+Optional CLI on PATH:
 
 ```bash
 npm link
 eval "$(fractalbot completion zsh)"   # or: fractalbot completion bash
 ```
 
-Start the control API and dashboard:
+---
+
+## Usage
+
+### Start (dashboard + control API)
 
 ```bash
 npm start
+# or
+fractalbot
 ```
 
-## CLI
+Open the dashboard at `http://127.0.0.1:20972` (port from `CONTROL_PORT`).
+
+### CLI essentials
 
 ```bash
-fractalbot join              # offline join + /login from Settings, then an interactive shell
-fractalbot join --daemon     # same, no shell; keep using the CLI against the running bot
+fractalbot join              # join + /login, then interactive shell
+fractalbot join --daemon     # join and keep running in background
 fractalbot status
 fractalbot chat hello
 fractalbot cmd home
-fractalbot map               # ASCII top-down of the lobby / area
-fractalbot hunt              # (re)start walking into server portals
+fractalbot map               # ASCII top-down of the area
+fractalbot hunt              # walk server portals out of lobby
+fractalbot unhunt
 fractalbot leave
-```
 
-`join` never asks for the password. Tab-complete works in the shell and after `eval "$(fractalbot completion zsh)"`.
-
-If a server portal cannot be found after join, the bot stays connected and retries every 60 seconds. A full kick from the server triggers an automatic reconnect.
-
-## Control API
-
-While the bot is running, a local API listens on `127.0.0.1:37637` only. It always requires `CONTROL_TOKEN` (written into `Settings/settings.json` on first run). The dashboard sets an HttpOnly cookie; CLI/curl send `Authorization: Bearer …`. `GET /health` stays unauthenticated (loopback-only). `GET /v1/catalog` requires the token.
-
-```bash
-TOKEN=$(node -e "console.log(JSON.parse(require('fs').readFileSync('Settings/settings.json','utf8')).values.CONTROL_TOKEN||'')")
-curl -s -H "authorization: Bearer $TOKEN" http://127.0.0.1:37637/v1/view?r=16
-curl -s -X POST http://127.0.0.1:37637/v1/rpc \
-  -H "authorization: Bearer $TOKEN" \
-  -H 'content-type: application/json' \
-  -d '{"action":"control","state":{"forward":true,"sprint":true}}'
-```
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/v1/catalog` | all routes + RPC actions |
-| GET | `/v1/status` | phase, pose, health, held movement keys |
-| GET | `/v1/view?r=20` | surroundings: look target, voxels, players, entities, portals |
-| GET | `/v1/voxels?r=20` | 3D surface-culled block field (same data as the dashboard viewport) |
-| GET | `/v1/map?r=24` | ASCII top-down slice |
-| GET | `/v1/cursor` | block / entity the bot is looking at |
-| GET | `/v1/block?x&y&z` | one block |
-| GET | `/v1/players` | known players |
-| GET | `/v1/entities` | nearby loaded entities |
-| GET | `/v1/inventory` | inventory snapshot |
-| GET | `/v1/dump` | world probe |
-| POST | `/v1/rpc` | JSON `{ "action": "...", ... }` — also `POST /v1/<action>` |
-| WS | `/v1/events` | live chat, kicks, portal, phase |
-
-Movement: `control`, `jump`, `stop`, `goto`, `look`, `lookAt`, `turn`.  
-Viewport: `view`, `voxels`, `map`, `cursor`, `block`, `dump`, `entities`, `players`.  
-Interact: `attack`, `dig`, `stopDig`, `place`, `activate`, `swing`, `inv`, `chat`, `command`.
-
-Join credentials and Minecraft host cannot be changed over the API — only via `Settings/` / CLI.
-
-```ts
-import { FractalBot } from "fractalbot";
-import { loadConfig } from "fractalbot/config";
-
-const bot = new FractalBot(loadConfig());
-await bot.join();
-bot.on("chat", (event) => console.log(event.raw));
-bot.chat("hello");
-```
-
-RPC actions: see `GET /v1/catalog`. Common ones include `join`, `leave`, `control`, `goto`, `look`, `view`, `voxels`, `inv`, `chat`, `command`, `attack`, `dig`, `place`, `hunt`.
-
-## How join works
-
-1. Connect offline to `alt3.6b6t.org` as Minecraft **1.21.11**.
-2. Send AnarchyMod `anarchymod:join`.
-3. `/login` with the stored password when the server asks.
-4. Offline accounts are sent to an End lobby island, then must walk **two server nether portals** (End island, then overworld sky lobby). The first lobby portal is a normal vanilla nether portal (2×3 interior). Decorative portal walls are ignored. Real nether portals in survival are ignored.
-5. Lobby portal transfers go through Velocity; the bot pauses physics during that configuration phase so it is not kicked.
-6. If kicked, reconnect with smart backoff. If a lobby portal is missing, wait a minute and scan again.
-
-## Captcha / anti-bot kicks
-
-When the server kicks the bot with an anti-bot or captcha message:
-
-- The full kick reason is logged and emitted on the `kicked` event / WebSocket.
-- Any `http://` or `https://` links found in the message are extracted and printed clearly so you can open them.
-- The bot **never** tries to solve captchas itself.
-- Default behaviour: wait `CAPTCHA_COOLDOWN_MS` (1 hour) then retry. Set it to `0` to stop reconnecting until you manually restart after solving the captcha with a normal Minecraft client.
-
-Rate-limit / “logging in too fast” kicks use a shorter floor delay (`RATE_LIMIT_COOLDOWN_MS`).
-
-Normal kicks use exponential backoff up to `RECONNECT_MAX_MS`. Backoff only resets after the bot has stayed on the main world for ~90 seconds (avoids hammering on crash loops).
-
-## Connection robustness (best of both bots)
-
-| Feature | Behaviour |
-|---------|-----------|
-| Login | Smart `/login` + `/register`, title/window detection, AnarchyMod payload |
-| Portals | Vanilla 2×3 detection, pathfinder walk-in, two-portal flow, decorative walls ignored |
-| Velocity transfer | Movement packets blocked during configuration phase |
-| Captcha | Classified, links extracted, long cooldown / optional halt |
-| Rate-limit | Separate floor delay |
-| Backoff | Exponential + jitter, resets only after 90 s stable on main |
-| Corrupt chunks | Recoverable parse errors are skipped; bot stays connected |
-| Auth | Offline (default) or Microsoft (`MC_AUTH=microsoft`) |
-| Elytra mapping | Argus/Elytra mapper: Xaero regions, box/ring/highway modes |
-
-## Elytra terrain mapping
-
-Embedded **Mineflayer-Elytra-Mapper** flight + Xaero region writer (uses Fractal’s connection for login/portals/captcha).
-
-**In-game setup (once):**
-1. Far base outside the no-`/home` radius (~5k on 6b6t): bed (respawn) + ender chest full of elytras.
-2. Launch platform near the area to map; `/sethome <name>` (default home name `spawn`).
-3. Put that name in `MAP_HOME_NAME`.
-
-**Configure** box / mode in `Settings/settings.json` (`MAP_MODE`, `MAP_BOX_*`, `MAP_OUTPUT_DIR`).
-
-**Run:**
-```bash
-fractalbot join --daemon
-fractalbot map-start box          # or spawn, ring, north, ...
+fractalbot map-start box     # elytra map: box | spawn | ring | north | ...
 fractalbot map-status
 fractalbot map-stop
 ```
 
-Dashboard: **map start** / **map stop** buttons.  
-RPC: `mapStart`, `mapStop`, `mapStatus`, `mapConfig`.
+Other useful commands: `goto`, `look`, `walk`, `stop`, `attack`, `dig`, `inv`, `players`, `view`, `shell`, `completion`.
 
-Regions land in `MAP_OUTPUT_DIR/regions/overworld/*.zip` (Xaero World Map compatible).
-
-## Discord remote control
-
-Optional. Install the dependency and set values in `Settings/settings.json`:
+### Discord (optional)
 
 ```bash
 npm install discord.js
 ```
+
+In `Settings/settings.json`:
 
 ```json
 "DISCORD_ENABLED": "1",
@@ -190,29 +120,64 @@ npm install discord.js
 "DISCORD_MIRROR_LOGS": "1"
 ```
 
-Enable **Message Content Intent** for the bot in the Discord Developer Portal. Invite it to a private channel.
+Enable **Message Content Intent** for the bot. Commands: `!help`, `!status`, `!join` / `!leave`, `!chat`, `!cmd`, `!hunt`, `!map on|off|status`, `!captcha`.
 
-| Command | Action |
-|---------|--------|
-| `!help` | List commands |
-| `!status` | Bot + mapper status |
-| `!join` / `!leave` / `!reconnect` | Session |
-| `!chat <msg>` / `!cmd <command>` | In-game chat / command |
-| `!hunt` / `!unhunt` | Lobby portal hunt |
-| `!map on [mode]` | Start elytra mapping |
-| `!map on box:x1,z1,x2,z2` | Map a box |
-| `!map off` / `!map status` | Stop / status |
-| `!captcha` | Last kick reason + captcha links |
+### Fleet
 
-Captcha kicks are posted to the channel when mirror logs are on.
+Each account is a profile under `Settings/Profiles/`. Use the dashboard **Fleet** panel (or API) to add accounts, toggle features (online / hunt / map / announcements / anti-AFK), and start/stop bots.
 
-## Documentation
+### Programmatic use
 
-- [Contributing](CONTRIBUTING.md)
-- [Code of Conducts](docs/CODE_OF_CONDUCT.md)
+```ts
+import { FractalBot } from "fractalbot";
+import { loadConfig } from "fractalbot/config";
 
-## Multi-account fleet
+const bot = new FractalBot(loadConfig());
+await bot.join();
+```
 
-Each account is one file under `Settings/Profiles/<LabelOrUsername>.json` (display label if set, otherwise the Minecraft username). Web **Fleet** panel: add accounts, assign tasks (`join` / `hunt` / `map` / `idle` / `leave`), start/stop each bot. Global `MC_USERNAME` in `Settings/settings.json` seeds the first profile on first run.
+Control API: `POST /v1/rpc` with JSON body `{ "action": "...", ... }` (token required if `CONTROL_TOKEN` is set). Event stream: WebSocket `/v1/events`.
 
-RPC: `fleetStatus`, `fleetAddAccount`, `fleetStart`, `fleetSetTask`, `fleetStartAll`, …
+---
+
+## Run
+
+```bash
+npm install
+npm start
+```
+
+Opens the control API + web dashboard (default `http://127.0.0.1:20972`).
+
+```bash
+fractalbot join              # join and open interactive shell
+fractalbot join --daemon     # join and keep running in background
+```
+
+Optional checks:
+
+```bash
+npm run typecheck
+npm test
+```
+
+---
+
+## Credits & Inspiration
+
+**Made by [Fractal42O](https://github.com/Fractal42O) for the 6b6t community.**
+
+Built on and inspired by:
+
+| Project | Link |
+|---------|------|
+| Original 6bBotAPI | https://github.com/ClapFy/6bBotAPI |
+| GaBaus Sky Logo Builder | https://github.com/RealGaBaus/GaBaus-Sky-Logo-Builder |
+| Mineflayer Elytra Mapper | https://github.com/fpvwraith/Mineflayer-Elytra-Mapper |
+| Mineflayer Mapart Bot | https://github.com/ComicSquid74273/mineflayer-Mapart-Bot |
+| THC Announcements Bot | https://github.com/stubbledbannana/THC-Anouncements-Bot |
+| 6b6t Join Bot | https://github.com/NOSLEEPSMOKE/6b6t-join-bot |
+| 6b Bot API | https://github.com/ClapFy/6bBotAPI |
+
+License: MIT — see [LICENSE](LICENSE).
+```
