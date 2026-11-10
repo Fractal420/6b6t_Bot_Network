@@ -1610,6 +1610,10 @@ function setView3dQuality(q) {
   }
   const sel = document.getElementById("view3d-quality");
   if (sel) sel.value = next;
+  const liteBtn = document.getElementById("view3d-quality-lite");
+  const fullBtn = document.getElementById("view3d-quality-full");
+  if (liteBtn) liteBtn.classList.toggle("on", next === "lite");
+  if (fullBtn) fullBtn.classList.toggle("on", next === "full");
   applyView3dState();
   void refreshVoxels();
 }
@@ -2433,6 +2437,22 @@ document.getElementById("survey-3d-on")?.addEventListener("click", () => {
 document.getElementById("survey-3d-off")?.addEventListener("click", () => {
   setView3dPref(false);
 });
+
+// 3D quality (lite / full) — same toolbar
+document.getElementById("view3d-quality-lite")?.addEventListener("click", () => {
+  setView3dQuality("lite");
+});
+document.getElementById("view3d-quality-full")?.addEventListener("click", () => {
+  setView3dQuality("full");
+});
+// Sync button state from stored preference on load
+(() => {
+  const q = getView3dQuality();
+  const liteBtn = document.getElementById("view3d-quality-lite");
+  const fullBtn = document.getElementById("view3d-quality-full");
+  if (liteBtn) liteBtn.classList.toggle("on", q === "lite");
+  if (fullBtn) fullBtn.classList.toggle("on", q === "full");
+})();
 
 // Notifications + service worker (captcha alerts on phone / background tab)
 updateNotifyChip();
