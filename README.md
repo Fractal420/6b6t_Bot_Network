@@ -177,7 +177,6 @@ Built on and inspired by:
 | Mineflayer Mapart Bot | https://github.com/ComicSquid74273/mineflayer-Mapart-Bot |
 | THC Announcements Bot | https://github.com/stubbledbannana/THC-Anouncements-Bot |
 | 6b6t Join Bot | https://github.com/NOSLEEPSMOKE/6b6t-join-bot |
-| 6b Bot API | https://github.com/ClapFy/6bBotAPI |
 
 License: MIT — see [LICENSE](LICENSE).
 ```
