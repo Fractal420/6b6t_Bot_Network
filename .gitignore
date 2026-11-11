@@ -11,6 +11,7 @@ coverage/
 accounts.json
 package-lock.json
 auth_cache/
+Settings/auth_cache/
 output/
 .idea/
 .vscode/

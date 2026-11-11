@@ -242,6 +242,13 @@ export function startControlServer(
       forward("detection", { botId: payload.id, ...(data && typeof data === "object" ? (data as object) : { value: data }) });
       return;
     }
+    if (payload.event === "msaCode") {
+      forward("msaCode", {
+        botId: payload.id,
+        ...(data && typeof data === "object" ? (data as object) : { value: data }),
+      });
+      return;
+    }
     forward(payload.event, data);
   });
 
@@ -366,6 +373,20 @@ async function dispatch(fleet: FleetManager, request?: ControlRequest): Promise<
     if (request.action === "fleetSetAnnouncements") {
       fleet.setDefaultAnnouncements(request.announcements || []);
       return { ok: true, data: { defaultAnnouncements: fleet.getDefaultAnnouncements() } };
+    }
+    if (request.action === "fleetMicrosoftAuth") {
+      try {
+        const msg = await fleet.authenticateMicrosoft(request.id);
+        const failed =
+          msg.startsWith("unknown account") ||
+          msg.startsWith("account missing") ||
+          msg.includes("is offline") ||
+          msg.includes("switch Auth");
+        if (failed) return { ok: false, error: msg };
+        return { ok: true, data: { result: msg, fleet: fleet.getFleetStatus() } };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
     }
 
     const botId = (request as { botId?: string }).botId || fleet.defaultBotId();

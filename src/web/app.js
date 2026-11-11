@@ -1744,6 +1744,28 @@ function connectEvents() {
     if (msg.event === "authenticated") {
       if (!isActiveBotEvent(msg.data)) return;
       push("sys", "authenticated");
+      hideMsaCodeBanner();
+    }
+    if (msg.event === "msaCode") {
+      if (!isActiveBotEvent(msg.data)) return;
+      const code = msg.data;
+      showMsaCodeBanner(code);
+      push("sys", `Microsoft code: ${code?.user_code || "?"} — open ${code?.verification_uri || "microsoft.com/link"}`);
+      // Copy + open automatically when the dashboard is focused
+      try {
+        if (code?.user_code && navigator.clipboard?.writeText) {
+          void navigator.clipboard.writeText(String(code.user_code));
+        }
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (code?.verification_uri) {
+          window.open(String(code.verification_uri), "_blank", "noopener,noreferrer");
+        }
+      } catch {
+        /* ignore */
+      }
     }
     if (msg.event === "worldKind") push("sys", `world ${msg.data}`);
     if (msg.event === "portalEntered") push("sys", `portal ${msg.data?.count ?? ""}`);
@@ -2849,6 +2871,18 @@ function fillProfileEditor(bot, force = false) {
   form.host.value = bot.host || "";
   form.port.value = bot.port != null ? bot.port : "";
   form.notes.value = bot.notes || "";
+
+  const msBtn = document.getElementById("profile-ms-auth");
+  if (msBtn) {
+    msBtn.hidden = (bot.auth || "offline") !== "microsoft";
+  }
+  // Keep banner if this profile already has a live device code
+  const msa = bot.bot?.msaCode;
+  if (msa && msa.user_code) {
+    showMsaCodeBanner(msa);
+  } else if ((bot.auth || "offline") !== "microsoft") {
+    hideMsaCodeBanner();
+  }
 }
 
 let tasksApplying = false;
@@ -3029,6 +3063,7 @@ document.getElementById("fleet-add")?.addEventListener("submit", async (e) => {
     map: false,
     mapMode: "box",
   };
+  const authMode = String(fd.get("auth") || "offline") === "microsoft" ? "microsoft" : "offline";
   const body = await rpc("fleetAddAccount", {
     account: {
       label: String(fd.get("label") || ""),
@@ -3036,11 +3071,11 @@ document.getElementById("fleet-add")?.addEventListener("submit", async (e) => {
       password: String(fd.get("password") || ""),
       features,
       enabled: false,
-      auth: "offline",
+      auth: authMode,
     },
   });
   e.target.reset();
-  logActivity(`added ${fd.get("username")}`);
+  logActivity(`added ${fd.get("username")} (${authMode})`);
   await refreshFleet();
   if (body.ok && body.data?.id) setSelectedBot(body.data.id);
 });
@@ -3088,9 +3123,14 @@ document.getElementById("profile-form")?.addEventListener("input", () => {
   profileFormDirty = true;
   profileFormDirtyUntil = Date.now() + 60_000;
 });
-document.getElementById("profile-form")?.addEventListener("change", () => {
+document.getElementById("profile-form")?.addEventListener("change", (e) => {
   profileFormDirty = true;
   profileFormDirtyUntil = Date.now() + 60_000;
+  if (e.target && e.target.name === "auth") {
+    const msBtn = document.getElementById("profile-ms-auth");
+    if (msBtn) msBtn.hidden = e.target.value !== "microsoft";
+    if (e.target.value !== "microsoft") hideMsaCodeBanner();
+  }
 });
 
 document.getElementById("profile-form")?.addEventListener("submit", async (e) => {
@@ -3254,6 +3294,66 @@ document.getElementById("profile-stop")?.addEventListener("click", async () => {
   await refreshFleet();
   await refresh();
 });
+
+document.getElementById("profile-ms-auth")?.addEventListener("click", async () => {
+  const id = document.getElementById("profile-form")?.id?.value;
+  if (!id) return;
+  push("sys", "Starting Microsoft device-code auth…");
+  const body = await rpc("fleetMicrosoftAuth", { id });
+  if (!body.ok) push("err", body.error || "Microsoft auth failed");
+  else push("sys", body.data?.result || "auth started");
+  await refreshFleet();
+  await refresh();
+});
+
+document.getElementById("msa-copy")?.addEventListener("click", async () => {
+  const el = document.getElementById("msa-user-code");
+  const code = el?.textContent?.trim();
+  if (!code) return;
+  try {
+    await navigator.clipboard.writeText(code);
+    push("sys", `Copied code ${code}`);
+  } catch {
+    // Fallback for non-secure contexts
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = code;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      push("sys", `Copied code ${code}`);
+    } catch (e) {
+      push("err", "Could not copy code");
+    }
+  }
+});
+
+function showMsaCodeBanner(data) {
+  const banner = document.getElementById("msa-code-banner");
+  const codeEl = document.getElementById("msa-user-code");
+  const link = document.getElementById("msa-open-link");
+  const hint = document.getElementById("msa-code-hint");
+  if (!banner || !codeEl) return;
+  const userCode = String(data?.user_code || "").trim();
+  const uri = String(data?.verification_uri || "https://www.microsoft.com/link").trim();
+  codeEl.textContent = userCode || "—";
+  if (link) {
+    link.href = uri;
+    link.textContent = "Open login";
+  }
+  if (hint) {
+    const exp =
+      typeof data?.expires_in === "number" ? ` · expires in ~${Math.round(data.expires_in / 60)} min` : "";
+    hint.textContent = `Enter the code at the Microsoft link${exp}. Tokens are cached under Settings/auth_cache and reused after restart.`;
+  }
+  banner.hidden = false;
+}
+
+function hideMsaCodeBanner() {
+  const banner = document.getElementById("msa-code-banner");
+  if (banner) banner.hidden = true;
+}
 
 setInterval(() => {
   if (document.hidden) return;

@@ -185,9 +185,56 @@ export class FleetManager extends EventEmitter {
       "portalFound",
       "worldKind",
       "error",
+      "msaCode",
     ] as const) {
       forward(e);
     }
+  }
+
+  /**
+   * Start (or re-use) the bot instance and connect so Microsoft device-code auth runs.
+   * Tokens are cached under Settings/auth_cache and reused on later restarts.
+   */
+  async authenticateMicrosoft(id: string): Promise<string> {
+    const account = this.accounts.find((a) => a.id === id);
+    if (!account) return `unknown account ${id}`;
+    if (account.auth !== "microsoft") {
+      return `profile "${account.username}" is offline — switch Auth to Microsoft first`;
+    }
+    if (!account.username) return "account missing username";
+
+    let bot = this.bots.get(id);
+    if (!bot) {
+      bot = new FractalBot(this.configFor(account));
+      this.wireBot(id, bot);
+      this.bots.set(id, bot);
+    } else {
+      bot.applyRuntimeConfig(this.configFor(account));
+    }
+
+    // Ensure Online so applyFeatures keeps the session if already connected.
+    if (!account.features.online) {
+      account.features = normalizeFeatures({ ...account.features, online: true });
+      saveAccountsFile({
+        version: 2,
+        accounts: this.accounts,
+        defaultAnnouncements: this.defaultAnnouncements,
+      });
+    }
+
+    const status = bot.getStatus();
+    if (!status.connected) {
+      await bot.join({
+        autoLobby: account.profile?.autoLobby !== false,
+        autoReconnect: true,
+        username: account.username,
+        password: account.password,
+        host: account.host || this.baseConfig.host,
+        port: account.port ?? this.baseConfig.port,
+      });
+    }
+
+    return `Microsoft auth started for ${account.username} — enter the device code when it appears`;
   }
 
   private stopSideJobs(id: string): void {

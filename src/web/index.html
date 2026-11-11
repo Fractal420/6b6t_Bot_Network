@@ -145,9 +145,16 @@
           <form id="fleet-add" class="fleet-add">
             <input name="label" placeholder="Label (optional)" />
             <input name="username" placeholder="Username" required />
-            <input name="password" type="password" placeholder="Password" />
+            <input name="password" type="password" placeholder="Password (offline)" />
+            <label class="auth-select">Auth
+              <select name="auth">
+                <option value="offline" selected>Offline</option>
+                <option value="microsoft">Microsoft</option>
+              </select>
+            </label>
             <button type="submit" class="primary">Create</button>
           </form>
+          <p class="hint">Offline needs an in-game password. Microsoft uses device-code login (Authenticate after creating).</p>
         </details>
 
         <section class="profile-editor" id="profile-editor" hidden>
@@ -156,7 +163,17 @@
             <div class="profile-actions-inline">
               <button type="button" id="profile-start">Start</button>
               <button type="button" id="profile-stop">Stop</button>
+              <button type="button" id="profile-ms-auth" class="primary" hidden title="Generate Microsoft device code">Authenticate</button>
             </div>
+          </div>
+          <div id="msa-code-banner" class="msa-code-banner" hidden>
+            <div class="msa-code-row">
+              <span class="msa-label">Microsoft code</span>
+              <code id="msa-user-code" class="msa-user-code"></code>
+              <button type="button" id="msa-copy" class="ghost">Copy</button>
+              <a id="msa-open-link" class="ghost" href="https://www.microsoft.com/link" target="_blank" rel="noopener">Open login</a>
+            </div>
+            <p class="hint" id="msa-code-hint">Enter the code at the Microsoft link. Tokens are saved and reused after restart.</p>
           </div>
           <form id="profile-form" class="profile-form">
             <input type="hidden" name="id" />

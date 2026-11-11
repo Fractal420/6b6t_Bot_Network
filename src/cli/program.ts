@@ -378,9 +378,20 @@ async function runSession(
     void shutdown();
   });
   process.on("uncaughtException", (error) => {
+    const msg = error instanceof Error ? error.message : String(error);
+    // Known prismarine-chat / NBT UUID BigInt crash — patched, but keep process alive if it slips through
+    if (/Cannot convert a BigInt value to a number/i.test(msg) || /BigInt/i.test(msg)) {
+      log.warn("ignored BigInt conversion error (chat/NBT)", msg);
+      return;
+    }
     log.error("uncaught exception", error);
   });
   process.on("unhandledRejection", (reason) => {
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    if (/Cannot convert a BigInt value to a number/i.test(msg) || /BigInt/i.test(msg)) {
+      log.warn("ignored BigInt rejection (chat/NBT)", msg);
+      return;
+    }
     log.error("unhandled rejection", reason instanceof Error ? reason : String(reason));
   });
 

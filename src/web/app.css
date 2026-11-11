@@ -4012,3 +4012,45 @@ header.top .profile-switcher {
   border-radius: 0 !important;
   filter: none !important;
 }
+
+/* Microsoft device-code auth banner */
+.msa-code-banner {
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  border: 1px solid rgba(88, 166, 255, 0.45);
+  background: linear-gradient(135deg, rgba(56, 139, 253, 0.12), rgba(88, 166, 255, 0.06));
+}
+.msa-code-banner[hidden] {
+  display: none !important;
+}
+.msa-code-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+}
+.msa-label {
+  font-size: 0.8rem;
+  opacity: 0.8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.msa-user-code {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 0.2rem 0.55rem;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.auth-select {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+.auth-select select {
+  min-height: 2rem;
+}

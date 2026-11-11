@@ -254,8 +254,17 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
       if (Date.now() - lastMoveCheck > 500) {
         if (here.distanceTo(lastMovePos) < 0.5) {
           stuckBoosts += 1;
+          // Physics can stay paused after Velocity reconfigure on some accounts
+          try {
+            if (bot.physicsEnabled === false) {
+              bot.physicsEnabled = true;
+              log.info("Re-enabled physics during portal approach");
+            }
+          } catch {
+            /* ignore */
+          }
           log.info(
-            `Portal approach stuck (boost ${stuckBoosts}${isLargePortal ? ", large" : ""}${belowPortal ? ", low" : ""}) y=${here.y.toFixed(1)} → re-center + jump`,
+            `Portal approach stuck (boost ${stuckBoosts}${isLargePortal ? ", large" : ""}${belowPortal ? ", low" : ""}) y=${here.y.toFixed(1)} physics=${bot.physicsEnabled !== false} → re-center + jump`,
           );
           void bot.lookAt(new Vec3(past.x, lookY, past.z), true).catch(() => {});
 
@@ -263,19 +272,33 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
           bot.setControlState("forward", false);
           bot.setControlState("back", true);
           bot.setControlState("jump", true);
-          await sleep(belowPortal ? 220 : 140);
+          await sleep(belowPortal ? 280 : 160);
           bot.setControlState("back", false);
           bot.setControlState("forward", true);
 
           // Strafe to slide off the frame edge
           bot.setControlState(stuckBoosts % 2 === 0 ? "left" : "right", true);
-          await sleep(isLargePortal ? 200 : 120);
+          await sleep(isLargePortal ? 220 : 140);
           bot.setControlState("left", false);
           bot.setControlState("right", false);
 
+          // Every few stuck cycles, try pathfinder toward the portal mouth
+          if (stuckBoosts % 4 === 0) {
+            try {
+              const { goals } = await import("../pathfinder.ts");
+              bot.pathfinder?.setGoal(
+                new goals.GoalNear(target.x, target.y, target.z, 0.8),
+                true,
+              );
+            } catch {
+              /* pathfinder optional */
+            }
+          }
+
           // After recovery, force a long jump-sprint charge
-          chargeUntil = Date.now() + (belowPortal ? 1600 : 1100);
+          chargeUntil = Date.now() + (belowPortal ? 1800 : 1200);
           bot.setControlState("jump", true);
+          bot.setControlState("sprint", true);
         }
         lastMoveCheck = Date.now();
         lastMovePos = here.clone();

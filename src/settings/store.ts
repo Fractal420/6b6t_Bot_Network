@@ -30,6 +30,11 @@ export function profilesDir(): string {
   return path.join(settingsDir(), "Profiles");
 }
 
+/** Persistent Microsoft/MSA token cache (survives restarts). */
+export function authCacheDir(): string {
+  return path.join(settingsDir(), "auth_cache");
+}
+
 export function settingsFilePath(): string {
   return path.join(settingsDir(), "settings.json");
 }
@@ -41,8 +46,10 @@ export function announcementsFilePath(): string {
 export function ensureSettingsLayout(): void {
   const dir = settingsDir();
   const profiles = profilesDir();
+  const authCache = authCacheDir();
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (!fs.existsSync(profiles)) fs.mkdirSync(profiles, { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(authCache)) fs.mkdirSync(authCache, { recursive: true, mode: 0o700 });
 }
 
 function safeWriteJson(filePath: string, data: unknown): void {

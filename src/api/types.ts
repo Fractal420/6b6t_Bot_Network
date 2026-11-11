@@ -124,6 +124,8 @@ export interface BotStatus {
   lastKickHint?: string;
   lastKickLinks?: string[];
   lastVerificationCode?: string;
+  /** Microsoft device-code flow (user_code + verification_uri). */
+  msaCode?: MsaDeviceCode | null;
   lastError: BotErrorInfo | null;
   lastChat?: string;
   autoReconnect: boolean;
@@ -131,6 +133,16 @@ export interface BotStatus {
   huntingPortal: boolean;
   /** Elytra mapper snapshot. */
   mapping?: unknown;
+}
+
+/** Payload from prismarine-auth / mineflayer onMsaCode. */
+export interface MsaDeviceCode {
+  user_code: string;
+  verification_uri: string;
+  message?: string;
+  expires_in?: number;
+  interval?: number;
+  at?: string;
 }
 
 export type BotErrorSource = "connect" | "kick" | "disconnect" | "socket";
@@ -267,6 +279,8 @@ export interface FractalBotEvents {
   lobbyRetry: (info: { inMs: number; reason: string }) => void;
   worldKind: (kind: WorldKind) => void;
   detection: (event: DetectionEvent) => void;
+  /** Microsoft device code ready for the user to enter at verification_uri. */
+  msaCode: (code: MsaDeviceCode) => void;
 }
 
 export type DetectionKind =

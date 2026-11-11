@@ -5,9 +5,10 @@ import mineflayer, { type Bot } from "mineflayer";
 import { goals, pathfinder } from "../minecraft/pathfinder.ts";
 import type { FractalConfig } from "../config.ts";
 import { log } from "../logger.ts";
+import { authCacheDir, ensureSettingsLayout } from "../settings/store.ts";
 import { attachAnarchyMod } from "../minecraft/anarchyMod.ts";
 import { attachAuth, type AuthController } from "../minecraft/auth.ts";
-import { attachProtocolCompat } from "../minecraft/protocolCompat.ts";
+import { attachProtocolCompat, patchPrismarineChatBigInt } from "../minecraft/protocolCompat.ts";
 import { attachVelocityTransfer } from "../minecraft/velocityTransfer.ts";
 import { sendCommand } from "../minecraft/command.ts";
 import { parseKick, kickReconnectBucket, type KickKind } from "../minecraft/kick.ts";
@@ -18,6 +19,14 @@ import { dumpWorld, persistDump, topBlockCounts } from "../minecraft/probe.ts";
 import { findPortalBlocks } from "../minecraft/lobby/portals.ts";
 import { clampVoxelRadius, sampleVoxels, type VoxelQuality } from "../minecraft/voxels.ts";
 import { createMapperBridge, type MapperHost, type MapperStatus } from "../mapper/bridge.ts";
+
+// Install before any bot connects (chat packets can arrive immediately after login)
+try {
+  patchPrismarineChatBigInt();
+} catch {
+  /* ignore */
+}
+
 /** Corrupt-chunk / deserializer errors that vanilla clients ignore — stay connected. */
 const RECOVERABLE_PARSE_RE =
   /Parse error|array size is abnormally large|Read error for|Chunk size|Deserialization error|PartialReadError|Read error/i;
@@ -76,6 +85,7 @@ export class FractalBot extends EventEmitter {
   private hostIndex = 0;
   private lastKickLinks: string[] = [];
   private lastVerificationCode?: string;
+  private lastMsaCode: import("./types.ts").MsaDeviceCode | null = null;
   private lastError?: BotErrorInfo;
   private faultJoinGeneration = -1;
   private reachedLogin = false;
@@ -189,6 +199,7 @@ export class FractalBot extends EventEmitter {
       lastKickKind: this.lastKickKind,
       lastKickLinks: this.lastKickLinks.length ? this.lastKickLinks : undefined,
       lastVerificationCode: this.lastVerificationCode,
+      msaCode: this.lastMsaCode,
       lastKickHint: this.lastKickHint,
       lastError: this.lastError ?? null,
       lastChat: this.lastChat,
@@ -1221,7 +1232,25 @@ export class FractalBot extends EventEmitter {
         viewDistance: this.config.viewDistance,
       };
       if (authMode === "microsoft") {
-        opts.profilesFolder = "./auth_cache";
+        ensureSettingsLayout();
+        opts.profilesFolder = authCacheDir();
+        // Surface device code to dashboard so the user can copy it and open Microsoft login.
+        (opts as { onMsaCode?: (data: import("./types.ts").MsaDeviceCode) => void }).onMsaCode = (data) => {
+          const payload: import("./types.ts").MsaDeviceCode = {
+            user_code: String(data?.user_code || ""),
+            verification_uri: String(data?.verification_uri || "https://www.microsoft.com/link"),
+            message: data?.message ? String(data.message) : undefined,
+            expires_in: typeof data?.expires_in === "number" ? data.expires_in : undefined,
+            interval: typeof data?.interval === "number" ? data.interval : undefined,
+            at: new Date().toISOString(),
+          };
+          this.lastMsaCode = payload;
+          log.info(
+            `Microsoft device code for ${info.username}: ${payload.user_code} → ${payload.verification_uri}`,
+          );
+          this.emit("msaCode", payload);
+          this.emit("status", this.getStatus());
+        };
       }
       bot = mineflayer.createBot(opts);
     } catch (error) {
@@ -1238,9 +1267,11 @@ export class FractalBot extends EventEmitter {
     attachProtocolCompat(bot);
     attachVelocityTransfer(bot);
 
-    this.auth = attachAuth(bot, this.password, () => {
+    const markGameAuthenticated = (reason: string) => {
       if (generation !== this.joinGeneration) return;
+      if (this.authenticated) return;
       this.authenticated = true;
+      log.info(`Authenticated (${reason})`);
       this.emit("authenticated");
       this.refreshWorld("authenticated");
       setTimeout(() => {
@@ -1255,7 +1286,12 @@ export class FractalBot extends EventEmitter {
           this.navigator?.start();
         }
       }, 3500);
-    });
+    };
+
+    // Offline/cracked: wait for server /login|/register success via chat.
+    // Microsoft/premium: 6b6t (and most anarchy servers) skip in-game /login —
+    // once MSA + TCP login succeed, the player is already "logged in" in lobby.
+    this.auth = attachAuth(bot, this.password, () => markGameAuthenticated("in-game /login"));
 
     let lastPortalEnterAt = 0;
     this.navigator = createPortalNavigator(bot, this.config.portalRetryMs, {
@@ -1343,16 +1379,34 @@ export class FractalBot extends EventEmitter {
       this.lastError = undefined;
       this.setPhase("authenticating");
       this.emit("connected");
-      log.info("TCP login complete, waiting for spawn + /login");
+      if (authMode === "microsoft") {
+        // Premium accounts are session-authenticated; no server /login required.
+        log.info("TCP login complete (Microsoft) — marking authenticated (no /login on this server)");
+        markGameAuthenticated("microsoft session");
+        try {
+          bot.physicsEnabled = true;
+        } catch {
+          /* ignore */
+        }
+      } else {
+        log.info("TCP login complete, waiting for spawn + /login");
+      }
     });
 
     bot.once("spawn", () => {
       if (generation !== this.joinGeneration) return;
+      // Safety net: if login handler raced, still mark MS accounts authenticated on first spawn
+      if (authMode === "microsoft" && !this.authenticated) {
+        markGameAuthenticated("microsoft spawn");
+      }
       this.onSpawn("first");
     });
 
     bot.on("spawn", () => {
       if (generation !== this.joinGeneration) return;
+      if (authMode === "microsoft" && !this.authenticated) {
+        markGameAuthenticated("microsoft spawn");
+      }
       this.refreshWorld("spawn");
     });
 

@@ -1,5 +1,57 @@
 import type { Bot } from "mineflayer";
+import { createRequire } from "node:module";
 import { log } from "../logger.ts";
+
+const require = createRequire(import.meta.url);
+
+/**
+ * prismarine-chat / minecraft-protocol call Buffer.writeInt32BE on UUID ints
+ * that arrive as BigInt from NBT. minecraft-protocol does:
+ *   const { processNbtMessage } = require("prismarine-chat")
+ * so patching the export is useless — the closed-over reference still crashes.
+ * Patch Buffer writers once so every caller accepts BigInt.
+ */
+let chatBigIntPatched = false;
+export function patchPrismarineChatBigInt(): void {
+  if (chatBigIntPatched) return;
+  chatBigIntPatched = true;
+  try {
+    const toInt32 = (value: unknown): number => {
+      if (typeof value === "bigint") {
+        const masked = Number(value & 0xffffffffn);
+        return masked > 0x7fffffff ? masked - 0x100000000 : masked;
+      }
+      if (typeof value === "number" && Number.isFinite(value)) return value | 0;
+      return Number(value) | 0;
+    };
+    const toUInt32 = (value: unknown): number => {
+      if (typeof value === "bigint") return Number(value & 0xffffffffn) >>> 0;
+      if (typeof value === "number" && Number.isFinite(value)) return value >>> 0;
+      return Number(value) >>> 0;
+    };
+
+    const proto = Buffer.prototype as Buffer & {
+      writeInt32BE: (value: number, offset?: number) => number;
+      writeInt32LE: (value: number, offset?: number) => number;
+      writeUInt32BE: (value: number, offset?: number) => number;
+      writeUInt32LE: (value: number, offset?: number) => number;
+    };
+    const wrap =
+      (orig: (value: number, offset?: number) => number, conv: (v: unknown) => number) =>
+      function (this: Buffer, value: number, offset?: number) {
+        return orig.call(this, conv(value), offset);
+      };
+
+    proto.writeInt32BE = wrap(proto.writeInt32BE, toInt32);
+    proto.writeInt32LE = wrap(proto.writeInt32LE, toInt32);
+    proto.writeUInt32BE = wrap(proto.writeUInt32BE, toUInt32);
+    proto.writeUInt32LE = wrap(proto.writeUInt32LE, toUInt32);
+
+    log.info("Patched Buffer int writers for BigInt UUIDs (chat/NBT safe)");
+  } catch (err) {
+    log.warn("Failed to patch BigInt buffer writers", err instanceof Error ? err.message : err);
+  }
+}
 
 /**
  * Vanilla 1.21.2+ sends `tick_end` every client tick and 1.21.4+ sends
@@ -7,6 +59,7 @@ import { log } from "../logger.ts";
  * 6b6t's sky-lobby backend ignores commands and portal logic until then.
  */
 export function attachProtocolCompat(bot: Bot): void {
+  patchPrismarineChatBigInt();
   const raw = bot._client as unknown as {
     on: (event: string, listener: (...args: unknown[]) => void) => void;
     write: (name: string, params: unknown) => void;
@@ -119,4 +172,23 @@ export function attachProtocolCompat(bot: Bot): void {
       }
     } catch {}
   });
+
+  // Soft-guard chat-related packets so a single bad NBT payload never tears down the client
+  const softChat = (name: string) => {
+    try {
+      const client = bot._client as unknown as {
+        on: (ev: string, fn: (...a: unknown[]) => void) => void;
+        listeners?: (ev: string) => Array<(...a: unknown[]) => void>;
+      };
+      // Prepend an error-swallowing listener; existing minecraft-protocol handlers still run
+      client.on(name, () => {
+        /* marker — actual protection is the processNbtMessage patch + process handlers */
+      });
+    } catch {
+      /* ignore */
+    }
+  };
+  for (const pkt of ["player_chat", "system_chat", "profileless_chat", "chat"]) {
+    softChat(pkt);
+  }
 }

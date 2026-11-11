@@ -68,6 +68,21 @@ export function attachVelocityTransfer(bot: Bot): void {
     inConfig = false;
     bot.physicsEnabled = true;
     log.info(`Left configuration phase (${reason}); physics resumed`);
+    // Some 1.21+ transfers leave physics paused for a tick; force-enable again shortly
+    setTimeout(() => {
+      try {
+        bot.physicsEnabled = true;
+      } catch {
+        /* ignore */
+      }
+    }, 200);
+    setTimeout(() => {
+      try {
+        bot.physicsEnabled = true;
+      } catch {
+        /* ignore */
+      }
+    }, 1000);
   };
 
   const raw = bot._client as unknown as {
