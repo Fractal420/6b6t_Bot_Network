@@ -53,12 +53,47 @@ export interface InventorySlot {
 
 export type EquipmentDest = "hand" | "off-hand" | "head" | "torso" | "legs" | "feet";
 
-export type InvOp = "hold" | "drop" | "dropStack" | "equip" | "unequip" | "use" | "swap";
+export type InvOp =
+  | "hold"
+  | "drop"
+  | "dropStack"
+  | "equip"
+  | "unequip"
+  | "use"
+  | "swap"
+  /** Left-click a slot in the currently open container window (e.g. /homes GUI). */
+  | "windowClick"
+  /** Close the currently open container window. */
+  | "windowClose";
+
+/** Open container / chest / /homes GUI (when bot.currentWindow is set). */
+export interface OpenWindowView {
+  id: number;
+  title: string;
+  type?: string;
+  /** Container slots only (not the player inventory portion of the combined window). */
+  slots: InventorySlot[];
+  /** First slot index that belongs to the player inventory inside this window. */
+  inventoryStart: number;
+}
+
+/** 1.21+ multi_action dialog (6b6t /homes) — not a container window. */
+export interface HomesDialogView {
+  title: string;
+  /** Home names as button labels from the dialog. */
+  homes: string[];
+}
 
 export interface InventoryView {
   quickBarSlot: number;
   held: InventorySlot | null;
   slots: InventorySlot[];
+  /** Present when a classic container GUI is open. */
+  window?: OpenWindowView | null;
+  /** Present when the server sent a Homes multi_action dialog (6b6t). */
+  homesDialog?: HomesDialogView | null;
+  /** Cached home names known to this bot session. */
+  homes?: string[];
 }
 
 export interface InvCommand {
@@ -67,6 +102,8 @@ export interface InvCommand {
   to?: number;
   dest?: EquipmentDest;
   count?: number;
+  /** mouseButton for windowClick: 0 = left, 1 = right (default 0). */
+  mouseButton?: number;
 }
 
 export interface PlayerInfo {
@@ -338,6 +375,12 @@ export type ControlRequest =
   | { action: "entities" }
   | { action: "inventory" }
   | ({ action: "inv" } & InvCommand)
+  /** Minecraft tab-complete for the partial command (e.g. "home " or "home ba"). */
+  | { action: "tabComplete"; partial: string }
+  /** Locally known home names. */
+  | { action: "homes" }
+  /** Run /homes and wait for the GUI (or chat list). Returns inventory view. */
+  | { action: "openHomes" }
   | { action: "dump" }
   | { action: "view"; radius?: number; map?: boolean }
   | { action: "voxels"; radius?: number }

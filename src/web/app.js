@@ -833,6 +833,34 @@ async function sendWireMessage(text) {
   if (trimmed.startsWith("/")) {
     const cmd = trimmed.slice(1);
     noteOutgoingWhisperCommand(cmd);
+    // Track home names from /sethome and /delhome so suggestions stay fresh offline
+    const homeMatch = cmd.match(/^(sethome|delhome)\s+(\S+)/i);
+    if (homeMatch) {
+      if (homeMatch[1].toLowerCase() === "sethome") rememberHomes([homeMatch[2]]);
+      else knownHomeNames.delete(homeMatch[2]);
+    }
+    // Dedicated path: wait for GUI and seed home list (server tab-complete is broken on 6b6t)
+    if (/^homes\b/i.test(cmd)) {
+      const res = await rpc("openHomes");
+      if (res.ok && res.data) {
+        renderInventory(res.data);
+        if (Array.isArray(res.data.homes)) rememberHomes(res.data.homes);
+        if (res.data.homesDialog?.homes?.length) {
+          showHomesDialogPanel(res.data.homesDialog.title || "Homes", res.data.homesDialog.homes);
+          push("sys", `homes dialog (${res.data.homesDialog.homes.length} homes)`);
+        } else if (res.data.window?.slots?.length) {
+          push("sys", `homes window open (${res.data.window.slots.length} slots)`);
+        } else {
+          await showHomesFallbackPanel();
+          push("sys", "homes: no dialog/GUI yet — showing known homes as buttons");
+        }
+      } else {
+        await rpc("command", { command: cmd });
+        setTimeout(() => void refresh({ force: true }), 400);
+        setTimeout(() => void showHomesFallbackPanel(), 600);
+      }
+      return;
+    }
     await rpc("command", { command: cmd });
     return;
   }
@@ -894,6 +922,20 @@ const PLAYER_ARG_COMMANDS = new Set(
   MC_COMMAND_LIST.filter((c) => c.playerArg).map((c) => c.cmd),
 );
 
+/** Commands whose first argument is a home name (tab-complete from server). */
+const HOME_ARG_COMMANDS = new Set(["home", "delhome"]);
+
+/** Cached home names learned from tab-complete and /homes window. */
+const knownHomeNames = new Set();
+
+function rememberHomes(names) {
+  if (!Array.isArray(names)) return;
+  for (const n of names) {
+    const s = String(n || "").trim();
+    if (s && !s.includes(" ")) knownHomeNames.add(s);
+  }
+}
+
 function collectSuggestPlayers(prefix) {
   const selfName = (window.__fractalStatus?.username || "").toLowerCase();
   const names = new Set();
@@ -909,6 +951,14 @@ function collectSuggestPlayers(prefix) {
     .filter((n) => !pfx || n.toLowerCase().startsWith(pfx))
     .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
     .slice(0, 12);
+}
+
+function collectSuggestHomes(prefix) {
+  const pfx = String(prefix || "").toLowerCase();
+  return [...knownHomeNames]
+    .filter((n) => !pfx || n.toLowerCase().startsWith(pfx))
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
+    .slice(0, 16);
 }
 
 function buildCommandSuggestions(value) {
@@ -941,8 +991,60 @@ function buildCommandSuggestions(value) {
       hint: "player",
     }));
   }
+  // Home-arg commands: suggest known homes (refreshed async from server tab-complete)
+  if (HOME_ARG_COMMANDS.has(cmdName) && !after.includes(" ")) {
+    return collectSuggestHomes(after).map((name) => ({
+      kind: "home",
+      label: name,
+      insert: `/${cmdName} ${name}`,
+      hint: "home",
+    }));
+  }
   return [];
 }
+
+/** Refresh local home list from bot (chat/GUI learned). No noisy server tab-complete spam. */
+let homeTabCompleteTimer = null;
+let homeTabCompleteSeq = 0;
+async function requestHomeTabComplete(partialCommand) {
+  const seq = ++homeTabCompleteSeq;
+  try {
+    const res = await rpc("tabComplete", { partial: partialCommand.replace(/^\//, "") });
+    if (seq !== homeTabCompleteSeq) return;
+    if (res?.ok && Array.isArray(res.data)) {
+      const names = res.data.map((s) => {
+        const t = String(s).trim();
+        const parts = t.split(/\s+/);
+        return parts[parts.length - 1];
+      });
+      rememberHomes(names);
+    }
+  } catch {
+    /* offline */
+  }
+}
+
+function scheduleHomeTabComplete(value) {
+  const text = String(value || "");
+  if (!text.startsWith("/")) return;
+  const m = text.match(/^\/(home|delhome)(\s(.*))?$/i);
+  if (!m) return;
+  clearTimeout(homeTabCompleteTimer);
+  homeTabCompleteTimer = setTimeout(() => {
+    const arg = m[3] != null ? m[3] : "";
+    void requestHomeTabComplete(`${m[1].toLowerCase()} ${arg}`);
+  }, 120);
+}
+
+// Seed known homes once when the page loads / bot connects
+void (async () => {
+  try {
+    const res = await rpc("homes");
+    if (res?.ok && Array.isArray(res.data)) rememberHomes(res.data);
+  } catch {
+    /* not connected yet */
+  }
+})();
 
 function bindSaySuggestions(inputId, listId) {
   const input = document.getElementById(inputId);
@@ -989,6 +1091,7 @@ function bindSaySuggestions(inputId, listId) {
   };
 
   const refresh = () => {
+    scheduleHomeTabComplete(input.value);
     items = buildCommandSuggestions(input.value);
     active = items.length ? 0 : -1;
     render();
@@ -1004,7 +1107,19 @@ function bindSaySuggestions(inputId, listId) {
     refresh();
   };
 
-  input.addEventListener("input", refresh);
+  input.addEventListener("input", () => {
+    refresh();
+    // After server tab-complete returns, rebuild list if still focused
+    if (/^\/(home|delhome)\b/i.test(input.value)) {
+      setTimeout(() => {
+        if (document.activeElement === input) {
+          items = buildCommandSuggestions(input.value);
+          active = items.length ? 0 : -1;
+          render();
+        }
+      }, 280);
+    }
+  });
   input.addEventListener("focus", refresh);
   input.addEventListener("blur", () => {
     // Delay so mousedown on a suggestion can fire
@@ -1448,6 +1563,127 @@ function fillCells(root, slots, bySlot, heldSlot) {
   }
 }
 
+function renderOpenWindow(win) {
+  const card = document.getElementById("homes-window-card");
+  const grid = document.getElementById("homes-window-grid");
+  const titleEl = document.getElementById("homes-window-title");
+  const hintEl = document.getElementById("homes-window-hint");
+  if (!card || !grid) return;
+  if (!win || !Array.isArray(win.slots) || win.slots.length === 0) {
+    // Keep card if we intentionally showed a fallback list
+    if (card.dataset.fallback === "1") return;
+    card.hidden = true;
+    grid.replaceChildren();
+    return;
+  }
+  card.dataset.fallback = "0";
+  card.hidden = false;
+  if (titleEl) titleEl.textContent = win.title || "Window";
+  const isHomes = /home/i.test(String(win.title || ""));
+  if (hintEl) {
+    hintEl.textContent = isHomes
+      ? "click a home to teleport (same as in-game /homes)"
+      : "click a slot in the open window";
+  }
+  // Learn home names from named items in the GUI
+  const homeNames = [];
+  for (const item of win.slots) {
+    const label = itemLabel(item);
+    if (label && label !== "item" && !/^minecraft:/.test(label)) homeNames.push(label);
+  }
+  if (isHomes) rememberHomes(homeNames);
+
+  grid.replaceChildren();
+  // Sort by slot so layout matches the chest order
+  const ordered = [...win.slots].sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0));
+  for (const item of ordered) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "home-btn";
+    btn.dataset.slot = String(item.slot);
+    const name = document.createElement("span");
+    name.className = "home-name";
+    name.textContent = itemLabel(item) || `slot ${item.slot}`;
+    const meta = document.createElement("span");
+    meta.className = "home-slot";
+    meta.textContent = `#${item.slot}`;
+    btn.append(name, meta);
+    btn.title = `${itemLabel(item)} (slot ${item.slot})`;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await invOp("windowClick", { slot: item.slot, mouseButton: 0 });
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    grid.append(btn);
+  }
+}
+
+/** Render the Homes button grid (from show_dialog or local cache). */
+function showHomesDialogPanel(title, homes) {
+  const names = (Array.isArray(homes) ? homes : [])
+    .map((h) => String(h || "").trim())
+    .filter((h) => h && !/^(cancel|close|back|exit)$/i.test(h));
+  rememberHomes(names);
+  const card = document.getElementById("homes-window-card");
+  const grid = document.getElementById("homes-window-grid");
+  const titleEl = document.getElementById("homes-window-title");
+  const hintEl = document.getElementById("homes-window-hint");
+  if (!card || !grid) return;
+  if (!names.length) {
+    card.hidden = true;
+    card.dataset.fallback = "0";
+    grid.replaceChildren();
+    return;
+  }
+  card.dataset.fallback = "0";
+  card.hidden = false;
+  if (titleEl) titleEl.textContent = title || "Homes";
+  if (hintEl) hintEl.textContent = "click a home to run /home";
+  grid.replaceChildren();
+  for (const homeName of names) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "home-btn";
+    const name = document.createElement("span");
+    name.className = "home-name";
+    name.textContent = homeName;
+    const meta = document.createElement("span");
+    meta.className = "home-slot";
+    meta.textContent = "/home";
+    btn.append(name, meta);
+    btn.title = `/home ${homeName}`;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await rpc("command", { command: `home ${homeName}` });
+        push("sys", `/home ${homeName}`);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    grid.append(btn);
+  }
+}
+
+/** When the server does not open a chest GUI, show known homes as /home buttons. */
+async function showHomesFallbackPanel() {
+  try {
+    const res = await rpc("homes");
+    if (res.ok && Array.isArray(res.data)) rememberHomes(res.data);
+  } catch {
+    /* ignore */
+  }
+  const names = [...knownHomeNames].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  showHomesDialogPanel("Homes", names);
+  const hintEl = document.getElementById("homes-window-hint");
+  if (hintEl && names.length) hintEl.textContent = "click a home to run /home (from known list)";
+  const card = document.getElementById("homes-window-card");
+  if (card && names.length) card.dataset.fallback = "1";
+}
+
 function renderInventory(data) {
   packView = asInvView(data);
   const bySlot = slotMap(packView.slots);
@@ -1478,6 +1714,7 @@ function renderInventory(data) {
     else if (selected) nameEl.textContent = `${itemLabel(selected)}  slot ${selectedSlot}  ×${selected.count}`;
     else nameEl.textContent = `empty slot ${selectedSlot} · click another to move here`;
   }
+  renderOpenWindow(packView.window);
   updateInventorySkin();
 }
 
@@ -1723,6 +1960,37 @@ function connectEvents() {
       if (!raw) return;
       lastSeenChat = raw;
       push("", raw);
+      // Learn home names from chat lines so /home suggestions work without server tab-complete
+      const hm = String(raw).match(/\bhomes?\s*(?:\([^)]*\))?\s*[:\-–]\s*(.+)$/i);
+      if (hm?.[1]) {
+        const parts = hm[1].split(/[,|;]+/).map((s) => s.trim().replace(/^['"]+|['"]+$/g, "").split(/\s+/)[0]);
+        rememberHomes(parts.filter((n) => n && /^[A-Za-z0-9_]{1,32}$/.test(n)));
+      }
+      const setm = String(raw).match(/\b(?:home\s+set|set\s+home)[:\s]+['"]?([A-Za-z0-9_]{1,32})/i);
+      if (setm?.[1]) rememberHomes([setm[1]]);
+    }
+    if (msg.event === "window") {
+      if (!isActiveBotEvent(msg.data) && msg.data?.botId) {
+        /* still allow if no botId filter match helpers need */
+      }
+      const inv = msg.data?.inventory;
+      if (inv) {
+        renderInventory(inv);
+        if (Array.isArray(inv.homes)) rememberHomes(inv.homes);
+        if (inv.homesDialog?.homes?.length) {
+          showHomesDialogPanel(inv.homesDialog.title || "Homes", inv.homesDialog.homes);
+        }
+      }
+      if (msg.data?.kind === "homesDialog" && Array.isArray(msg.data.homes)) {
+        rememberHomes(msg.data.homes);
+        showHomesDialogPanel(msg.data.title || "Homes", msg.data.homes);
+      }
+      if (msg.data?.open === false) {
+        const card = document.getElementById("homes-window-card");
+        if (card && card.dataset.fallback !== "1") {
+          card.hidden = true;
+        }
+      }
     }
     if (msg.event === "kicked") {
       if (!isActiveBotEvent(msg.data)) return;
@@ -2158,6 +2426,19 @@ document.querySelectorAll("[data-inv]").forEach((btn) => {
   });
 });
 
+document.getElementById("homes-window-close")?.addEventListener("click", async () => {
+  const card = document.getElementById("homes-window-card");
+  if (card) {
+    card.dataset.fallback = "0";
+    card.hidden = true;
+  }
+  try {
+    await invOp("windowClose");
+  } catch {
+    /* no window */
+  }
+});
+
 window.addEventListener("survey-keys", (event) => {
   if (event.detail?.owns) clearBotKeys();
 });
@@ -2203,36 +2484,51 @@ function setDetNotifyPref(key, on) {
   }
 }
 
-function loadDetNotifyPrefs() {
+/** Detection notify prefs for the selected profile (server-side profile.notifyPrefs). */
+function loadDetNotifyPrefs(bot) {
+  const defaults = {
+    playerEnter: true,
+    playerLeave: false,
+    combat: true,
+    crystals: false,
+    tnt: false,
+    explosions: false,
+    onlyHidden: true,
+    lobby: false,
+  };
+  const b = bot || (fleetState?.bots || []).find((x) => x.id === selectedBotId);
+  const n = (b && b.profile && b.profile.notifyPrefs) || {};
   return {
-    playerEnter: detNotifyPref(DET_NOTIFY_KEYS.playerEnter, true),
-    playerLeave: detNotifyPref(DET_NOTIFY_KEYS.playerLeave, false),
-    combat: detNotifyPref(DET_NOTIFY_KEYS.combat, true),
-    crystals: detNotifyPref(DET_NOTIFY_KEYS.crystals, false),
-    tnt: detNotifyPref(DET_NOTIFY_KEYS.tnt, false),
-    explosions: detNotifyPref(DET_NOTIFY_KEYS.explosions, false),
-    onlyHidden: detNotifyPref(DET_NOTIFY_KEYS.onlyHidden, true),
-    // Default OFF — lobby is ignored for push notifications
-    lobby: detNotifyPref(DET_NOTIFY_KEYS.lobby, false),
+    playerEnter: typeof n.playerEnter === "boolean" ? n.playerEnter : defaults.playerEnter,
+    playerLeave: typeof n.playerLeave === "boolean" ? n.playerLeave : defaults.playerLeave,
+    combat: typeof n.combat === "boolean" ? n.combat : defaults.combat,
+    crystals: typeof n.crystals === "boolean" ? n.crystals : defaults.crystals,
+    tnt: typeof n.tnt === "boolean" ? n.tnt : defaults.tnt,
+    explosions: typeof n.explosions === "boolean" ? n.explosions : defaults.explosions,
+    onlyHidden: typeof n.onlyHidden === "boolean" ? n.onlyHidden : defaults.onlyHidden,
+    lobby: typeof n.lobby === "boolean" ? n.lobby : defaults.lobby,
   };
 }
 
-function saveDetNotifyPrefsFromForm(form) {
-  if (!form) return;
+/** Read notify prefs from the detection settings form (saved onto the profile). */
+function notifyPrefsFromForm(form) {
+  if (!form) return {};
   const boolSel = (v) => v === "true" || v === true;
-  if (form.notifyPlayerEnter) setDetNotifyPref(DET_NOTIFY_KEYS.playerEnter, boolSel(form.notifyPlayerEnter.value));
-  if (form.notifyPlayerLeave) setDetNotifyPref(DET_NOTIFY_KEYS.playerLeave, boolSel(form.notifyPlayerLeave.value));
-  if (form.notifyCombat) setDetNotifyPref(DET_NOTIFY_KEYS.combat, boolSel(form.notifyCombat.value));
-  if (form.notifyCrystals) setDetNotifyPref(DET_NOTIFY_KEYS.crystals, boolSel(form.notifyCrystals.value));
-  if (form.notifyTnt) setDetNotifyPref(DET_NOTIFY_KEYS.tnt, boolSel(form.notifyTnt.value));
-  if (form.notifyExplosions) setDetNotifyPref(DET_NOTIFY_KEYS.explosions, boolSel(form.notifyExplosions.value));
-  if (form.notifyOnlyHidden) setDetNotifyPref(DET_NOTIFY_KEYS.onlyHidden, boolSel(form.notifyOnlyHidden.value));
-  if (form.notifyInLobby) setDetNotifyPref(DET_NOTIFY_KEYS.lobby, boolSel(form.notifyInLobby.value));
+  return {
+    playerEnter: form.notifyPlayerEnter ? boolSel(form.notifyPlayerEnter.value) : true,
+    playerLeave: form.notifyPlayerLeave ? boolSel(form.notifyPlayerLeave.value) : false,
+    combat: form.notifyCombat ? boolSel(form.notifyCombat.value) : true,
+    crystals: form.notifyCrystals ? boolSel(form.notifyCrystals.value) : false,
+    tnt: form.notifyTnt ? boolSel(form.notifyTnt.value) : false,
+    explosions: form.notifyExplosions ? boolSel(form.notifyExplosions.value) : false,
+    onlyHidden: form.notifyOnlyHidden ? boolSel(form.notifyOnlyHidden.value) : true,
+    lobby: form.notifyInLobby ? boolSel(form.notifyInLobby.value) : false,
+  };
 }
 
-function fillDetNotifyForm(form) {
+function fillDetNotifyForm(form, bot) {
   if (!form) return;
-  const p = loadDetNotifyPrefs();
+  const p = loadDetNotifyPrefs(bot);
   if (form.notifyPlayerEnter) form.notifyPlayerEnter.value = p.playerEnter ? "true" : "false";
   if (form.notifyPlayerLeave) form.notifyPlayerLeave.value = p.playerLeave ? "true" : "false";
   if (form.notifyCombat) form.notifyCombat.value = p.combat ? "true" : "false";
@@ -2515,8 +2811,16 @@ function openTabSettings(kind) {
     const show = block.getAttribute("data-for") === kind;
     block.hidden = !show;
   });
-  const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
-  fillProfileSettingsForm(bot);
+  // Always refresh fleet first so profile fields (listener, host, …) match disk
+  void (async () => {
+    try {
+      await refreshFleet();
+    } catch {
+      /* ignore */
+    }
+    const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
+    fillProfileSettingsForm(bot);
+  })();
   // Show save only for play/map/detect (announce uses its own save)
   const saveBtn = document.getElementById("settings-save");
   if (saveBtn) saveBtn.hidden = kind === "announce";
@@ -2537,14 +2841,24 @@ document.getElementById("tab-settings-overlay")?.addEventListener("click", (e) =
   if (e.target === e.currentTarget) closeTabSettings();
 });
 
-async function loadSettingsForm() {
+async function loadSettingsForm(attempt = 0) {
   const form = document.getElementById("settings-form");
   const pathEl = document.getElementById("settings-path");
   const msg = document.getElementById("settings-msg-global");
   if (!form) return;
   if (msg) msg.hidden = true;
-  const body = await rpc("getSettings", {});
+  let body;
+  try {
+    body = await rpc("getSettings", {});
+  } catch (err) {
+    body = { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
   if (!body.ok || !body.data) {
+    // Control API may not be up yet after restart — retry quietly
+    if (attempt < 40) {
+      setTimeout(() => void loadSettingsForm(attempt + 1), 500);
+      return;
+    }
     if (msg) {
       msg.hidden = false;
       msg.className = "settings-msg err";
@@ -2924,12 +3238,30 @@ function syncFeatureSwitches(bot) {
   if (legacyMode) legacyMode.value = mode;
   const annFor = document.getElementById("announce-for");
   if (annFor) {
-    annFor.textContent = bot ? `For ${bot.label || bot.username}` : "Select a profile first";
+    annFor.textContent = bot ? `Modules for ${bot.label || bot.username}` : "Select a profile first";
   }
+  const mapFor = document.getElementById("map-for");
+  if (mapFor) {
+    mapFor.textContent = bot ? `Map module · ${bot.label || bot.username}` : "Select a profile first";
+  }
+  const detectFor = document.getElementById("detect-for");
+  if (detectFor) {
+    detectFor.textContent = bot ? `Detect module · ${bot.label || bot.username}` : "Select a profile first";
+  }
+  const playFor = document.getElementById("play-for");
+  if (playFor) {
+    playFor.textContent = bot ? `Play module · ${bot.label || bot.username}` : "Select a profile first";
+  }
+  // Always rebind announce messages to the selected profile (unless user is editing)
   const ann = document.getElementById("announce-json");
-  if (ann && bot && !ann.dataset.touched) {
-    const msgs = bot.announcementMessages;
-    if (Array.isArray(msgs)) {
+  if (ann) {
+    if (!bot) {
+      ann.value = "";
+      delete ann.dataset.touched;
+    } else if (!ann.dataset.touched) {
+      const msgs = Array.isArray(bot.announcementMessages) && bot.announcementMessages.length
+        ? bot.announcementMessages
+        : (fleetState?.defaultAnnouncements || []);
       ann.value = JSON.stringify(msgs, null, 2);
     }
   }
@@ -3207,6 +3539,10 @@ document.addEventListener("change", (e) => {
         if (!t.checked) applyView3dState();
         await refresh();
         applyView3dState();
+        // Load process + profile settings for the active profile (no manual reload)
+        void loadSettingsForm(0);
+        const bot = (fleetState?.bots || []).find((b) => b.id === botId);
+        fillProfileSettingsForm(bot);
       }
     })();
     return;
@@ -3751,7 +4087,10 @@ function fillProfileSettingsForm(bot) {
   if (form.detectionTnt) form.detectionTnt.value = p.detectionTnt === false ? "false" : "true";
   if (form.detectionExplosions) form.detectionExplosions.value = p.detectionExplosions === false ? "false" : "true";
   if (form.detectionCombat) form.detectionCombat.value = p.detectionCombat === false ? "false" : "true";
-  fillDetNotifyForm(form);
+  if (form.serverListener) form.serverListener.value = p.serverListener === true ? "true" : "false";
+  if (form.serverListenerOutbound) form.serverListenerOutbound.value = p.serverListenerOutbound === false ? "false" : "true";
+  if (form.antiAfkIntervalMs) form.antiAfkIntervalMs.value = p.antiAfkIntervalMs ?? "60000";
+  fillDetNotifyForm(form, bot);
 }
 
 async function saveProfileSettings() {
@@ -3759,15 +4098,8 @@ async function saveProfileSettings() {
   const msg = document.getElementById("settings-msg");
   if (!form) return;
 
-  // Device-local notification prefs (always saved, even without a profile)
-  saveDetNotifyPrefsFromForm(form);
-  const anyNotify =
-    form.notifyPlayerEnter?.value === "true" ||
-    form.notifyPlayerLeave?.value === "true" ||
-    form.notifyCombat?.value === "true" ||
-    form.notifyCrystals?.value === "true" ||
-    form.notifyTnt?.value === "true" ||
-    form.notifyExplosions?.value === "true";
+  const notifyPrefs = notifyPrefsFromForm(form);
+  const anyNotify = Object.values(notifyPrefs).some(Boolean);
   if (anyNotify) {
     void ensureNotificationPermission().then((ok) => {
       if (ok) void registerServiceWorker();
@@ -3777,8 +4109,8 @@ async function saveProfileSettings() {
   if (!selectedBotId) {
     if (msg) {
       msg.hidden = false;
-      msg.textContent = "Notification prefs saved on this device (select a profile for bot settings)";
-      msg.className = "settings-msg ok";
+      msg.textContent = "Select a profile first — module settings are per profile";
+      msg.className = "settings-msg err";
     }
     return;
   }
@@ -3820,6 +4152,10 @@ async function saveProfileSettings() {
       detectionTnt: boolSel(form.detectionTnt?.value),
       detectionExplosions: boolSel(form.detectionExplosions?.value),
       detectionCombat: boolSel(form.detectionCombat?.value),
+      serverListener: boolSel(form.serverListener?.value) === true,
+      serverListenerOutbound: boolSel(form.serverListenerOutbound?.value) !== false,
+      antiAfkIntervalMs: num(form.antiAfkIntervalMs?.value),
+      notifyPrefs,
     },
   };
   if (!account.username) {
@@ -3834,9 +4170,10 @@ async function saveProfileSettings() {
   if (msg) {
     msg.hidden = false;
     if (body.ok) {
-      msg.textContent = "Saved for this profile · notification prefs stored on this device";
+      msg.textContent = "Saved for this profile only · listener & bot settings applied to this account";
       msg.className = "settings-msg ok";
       closeTabSettings();
+      // Apply live flags only on the selected bot (RPC set targets selected bot)
       await rpc("set", {
         autoLobby: account.profile.autoLobby,
         autoReconnect: account.profile.autoReconnect,
@@ -3847,6 +4184,8 @@ async function saveProfileSettings() {
     }
   }
   await refreshFleet();
+  const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
+  fillProfileSettingsForm(bot);
 }
 
 document.getElementById("settings-save")?.addEventListener("click", () => void saveProfileSettings());
@@ -3855,8 +4194,13 @@ document.getElementById("settings-save")?.addEventListener("click", () => void s
 const _origSetSelectedBot = setSelectedBot;
 setSelectedBot = function (id) {
   _origSetSelectedBot(id);
+  // Switching profile: reload module UI (announce messages, toggles, settings)
+  const ann = document.getElementById("announce-json");
+  if (ann) delete ann.dataset.touched;
   const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId) || null;
   fillProfileSettingsForm(bot);
+  syncFeatureSwitches(bot);
+  void loadSettingsForm(0);
 };
 
 document.getElementById("toggle-notify")?.addEventListener("change", async (e) => {

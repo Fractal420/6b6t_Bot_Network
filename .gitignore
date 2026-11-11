@@ -18,3 +18,7 @@ output/
 Settings/Profiles/
 Settings/announcements.json
 Settings/settings.json
+Settings/serverlistener.ndjson
+Settings/serverlistener*.ndjson
+Settings/homes/
+Settings/homes/*.json

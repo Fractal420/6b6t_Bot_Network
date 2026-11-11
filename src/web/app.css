@@ -1175,6 +1175,51 @@ input:focus {
 .mc-inv-card {
   background: #1a1d24 !important;
 }
+
+/* /homes (and other) open-container GUI */
+#homes-window-card .pack-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.homes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));
+  gap: 0.45rem;
+  margin-top: 0.4rem;
+}
+.home-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  min-height: 3.2rem;
+  padding: 0.4rem 0.35rem;
+  border: 1px solid #3a4150;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #2c3340 0%, #1e2430 100%);
+  color: #e8ecf4;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.15;
+  text-align: center;
+  word-break: break-word;
+}
+.home-btn:hover {
+  border-color: #6b9cff;
+  background: linear-gradient(180deg, #354056 0%, #243048 100%);
+}
+.home-btn .home-slot {
+  font-size: 0.65rem;
+  opacity: 0.55;
+}
+.home-btn .home-name {
+  font-weight: 600;
+}
+
 .mc-inv {
   display: flex;
   flex-direction: column;

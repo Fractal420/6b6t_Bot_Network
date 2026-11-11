@@ -74,6 +74,24 @@ export interface AccountProfile {
   detectionTnt?: boolean;
   detectionExplosions?: boolean;
   detectionCombat?: boolean;
+  serverListener?: boolean;
+  /** Include client→server packets when serverListener is on (default true). */
+  serverListenerOutbound?: boolean;
+  /** Anti-AFK interval for this profile (ms). */
+  antiAfkIntervalMs?: number;
+  /**
+   * Push/browser notification prefs for detection — stored per profile on disk.
+   */
+  notifyPrefs?: {
+    playerEnter?: boolean;
+    playerLeave?: boolean;
+    combat?: boolean;
+    crystals?: boolean;
+    tnt?: boolean;
+    explosions?: boolean;
+    onlyHidden?: boolean;
+    lobby?: boolean;
+  };
 }
 
 export interface AccountRecord {
@@ -224,6 +242,19 @@ function normalizeProfile(p: Partial<AccountProfile> | undefined): AccountProfil
   }
   for (const k of ["detectionPlayers", "detectionCrystals", "detectionTnt", "detectionExplosions", "detectionCombat"] as const) {
     if (typeof p[k] === "boolean") out[k] = p[k];
+  }
+  if (typeof p.serverListener === "boolean") out.serverListener = p.serverListener;
+  if (typeof p.serverListenerOutbound === "boolean") out.serverListenerOutbound = p.serverListenerOutbound;
+  if (typeof p.antiAfkIntervalMs === "number" && Number.isFinite(p.antiAfkIntervalMs) && p.antiAfkIntervalMs >= 5_000) {
+    out.antiAfkIntervalMs = Math.floor(p.antiAfkIntervalMs);
+  }
+  if (p.notifyPrefs && typeof p.notifyPrefs === "object") {
+    const n = p.notifyPrefs as Record<string, unknown>;
+    const prefs: NonNullable<AccountProfile["notifyPrefs"]> = {};
+    for (const k of ["playerEnter", "playerLeave", "combat", "crystals", "tnt", "explosions", "onlyHidden", "lobby"] as const) {
+      if (typeof n[k] === "boolean") prefs[k] = n[k] as boolean;
+    }
+    if (Object.keys(prefs).length) out.notifyPrefs = prefs;
   }
   return out;
 }

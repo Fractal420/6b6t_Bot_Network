@@ -112,6 +112,9 @@ const DEFAULT_VALUES: SettingsMap = {
   DISCORD_TOKEN: "",
   DISCORD_CHANNEL_ID: "",
   DISCORD_MIRROR_LOGS: "1",
+  SERVER_LISTENER: "0",
+  SERVER_LISTENER_OUTBOUND: "1",
+  SERVER_LISTENER_PATH: "",
 };
 
 function envCandidates(): string[] {

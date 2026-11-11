@@ -5,12 +5,18 @@ import mineflayer, { type Bot } from "mineflayer";
 import { goals, pathfinder } from "../minecraft/pathfinder.ts";
 import type { FractalConfig } from "../config.ts";
 import { log } from "../logger.ts";
-import { authCacheDir, ensureSettingsLayout } from "../settings/store.ts";
+import { authCacheDir, ensureSettingsLayout, settingsDir } from "../settings/store.ts";
 import { attachAnarchyMod } from "../minecraft/anarchyMod.ts";
 import { attachAuth, type AuthController } from "../minecraft/auth.ts";
 import { attachProtocolCompat, patchPrismarineChatBigInt } from "../minecraft/protocolCompat.ts";
 import { attachVelocityTransfer } from "../minecraft/velocityTransfer.ts";
 import { sendCommand } from "../minecraft/command.ts";
+import {
+  attachServerListener,
+  detachServerListener,
+  defaultServerListenerPath,
+} from "../minecraft/serverListener.ts";
+import { loadHomes, saveHomes } from "../settings/homesStore.ts";
 import { parseKick, kickReconnectBucket, type KickKind } from "../minecraft/kick.ts";
 import { redactSecrets } from "./security.ts";
 import { createPortalNavigator, type PortalNavigator } from "../minecraft/lobby/navigator.ts";
@@ -104,6 +110,12 @@ export class FractalBot extends EventEmitter {
   private password: string;
   private invChain: Promise<unknown> = Promise.resolve();
   private jumpTimer: NodeJS.Timeout | null = null;
+  /** Home names learned from chat / GUI / sethome (server tab-complete is unreliable on 6b6t). */
+  private knownHomes = new Set<string>();
+  /** Last Homes multi_action dialog from show_dialog (6b6t 1.21+). */
+  private lastHomesDialog: { title: string; homes: string[] } | null = null;
+  private homesWindowWaiter: { resolve: (v: boolean) => void; timer: NodeJS.Timeout } | null = null;
+  private tabCompleteTx = 1;
   /** Current reconnect delay (exponential backoff). */
   private reconnectDelayMs: number;
   /** True when a captcha kick told us to stop auto-reconnect entirely. */
@@ -157,7 +169,27 @@ export class FractalBot extends EventEmitter {
     if (this.bot && this.detectionRecheckTimer) {
       this.restartDetectionRecheck(this.bot, this.joinGeneration);
     }
+    // Toggle packet listener without reconnect
+    if (this.bot) {
+      this.wireServerListener(this.bot);
+    } else {
+      const key = (next.profileId || next.username || this.config.profileId || this.config.username || "").toLowerCase();
+      if (key) detachServerListener(key);
+    }
     this.emit("status", this.getStatus());
+  }
+
+  private wireServerListener(bot: Bot): void {
+    const profileKey = this.config.profileId || this.config.username || bot.username || "unknown";
+    const filePath =
+      this.config.serverListenerPath?.trim() ||
+      defaultServerListenerPath(settingsDir(), profileKey);
+    attachServerListener(bot, {
+      enabled: this.config.serverListener === true,
+      outbound: this.config.serverListenerOutbound !== false,
+      filePath,
+      key: profileKey,
+    });
   }
 
   override on<U extends keyof FractalBotEvents>(event: U, listener: FractalBotEvents[U]): this {
@@ -1147,11 +1179,239 @@ export class FractalBot extends EventEmitter {
     }
     const quickBarSlot = bot.quickBarSlot ?? 0;
     const heldItem = bot.heldItem;
+    const win = bot.currentWindow as
+      | {
+          id?: number;
+          title?: unknown;
+          type?: string;
+          slots?: Array<{
+            slot: number;
+            name?: string;
+            count?: number;
+            displayName?: string;
+            customName?: string | null;
+            stackSize?: number;
+            durabilityUsed?: number;
+            maxDurability?: number;
+          } | null>;
+          inventoryStart?: number;
+        }
+      | null
+      | undefined;
+    let windowView: InventoryView["window"] = null;
+    if (win && typeof win.id === "number") {
+      const invStart = typeof win.inventoryStart === "number" ? win.inventoryStart : 0;
+      const containerSlots: InventorySlot[] = [];
+      if (Array.isArray(win.slots)) {
+        for (const item of win.slots) {
+          if (!item || item.slot == null) continue;
+          // Only expose container portion; player inv is already in `slots`
+          if (invStart > 0 && item.slot >= invStart) continue;
+          containerSlots.push(snapshotItem(item as never));
+        }
+      }
+      windowView = {
+        id: win.id,
+        title: stripWindowTitle(win.title),
+        type: win.type,
+        slots: containerSlots,
+        inventoryStart: invStart,
+      };
+    }
     return {
       quickBarSlot,
       held: heldItem ? snapshotItem(heldItem) : null,
       slots,
+      window: windowView,
+      homesDialog: this.lastHomesDialog
+        ? { title: this.lastHomesDialog.title, homes: [...this.lastHomesDialog.homes] }
+        : null,
+      homes: this.getHomes(),
     };
+  }
+
+  /** Locally known home names (from /homes dialog, chat, or successful suggestions). */
+  getHomes(): string[] {
+    return [...this.knownHomes].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  }
+
+  rememberHome(name: string): void {
+    const n = String(name || "").trim();
+    if (!n || n.includes(" ") || n.length > 48) return;
+    if (/^(cancel|close|back|exit)$/i.test(n)) return;
+    this.knownHomes.add(n);
+  }
+
+  forgetHome(name: string): void {
+    this.knownHomes.delete(String(name || "").trim());
+    this.persistHomes();
+  }
+
+  private loadHomesFromDisk(): void {
+    const profileId = this.config.profileId || this.config.username;
+    if (!profileId) return;
+    const list = loadHomes(profileId, this.config.username);
+    this.knownHomes = new Set(list);
+    if (list.length) log.info(`Loaded ${list.length} home(s) for profile ${profileId}`);
+  }
+
+  /** Replace the full home list (e.g. after /homes dialog) and save. */
+  replaceHomes(names: string[]): void {
+    this.knownHomes = new Set();
+    for (const n of names) this.rememberHome(n);
+    this.persistHomes();
+  }
+
+  private persistHomes(): void {
+    const profileId = this.config.profileId || this.config.username;
+    if (!profileId) return;
+    const saved = saveHomes(profileId, this.getHomes(), this.config.username);
+    this.knownHomes = new Set(saved);
+  }
+
+  /**
+   * Home suggestions from cache, plus a modern tab_complete request (transactionId).
+   * Mineflayer's default tabComplete still sends the legacy assumeCommand form which
+   * 6b6t ignores — we write the 1.19+ packet ourselves.
+   */
+  async tabComplete(partial: string): Promise<string[]> {
+    const text = String(partial || "").replace(/^\//, "");
+    const lower = text.toLowerCase();
+    const isHomeCmd = /^(home|delhome|sethome)\b/.test(lower);
+    const arg = isHomeCmd ? text.replace(/^(home|delhome|sethome)\s*/i, "") : "";
+
+    if (isHomeCmd) {
+      const pfx = arg.toLowerCase();
+      const local = this.getHomes().filter((h) => !pfx || h.toLowerCase().startsWith(pfx));
+      void this.tryServerTabComplete(text).then((remote) => {
+        for (const m of remote) {
+          const token = m.split(/\s+/).pop() || m;
+          if (token && !token.includes(" ")) this.rememberHome(token);
+        }
+      });
+      return local.slice(0, 50);
+    }
+
+    return this.tryServerTabComplete(text);
+  }
+
+  private async tryServerTabComplete(text: string): Promise<string[]> {
+    const bot = this.bot;
+    if (!bot?._client) return [];
+    const client = bot._client as {
+      write: (name: string, params: Record<string, unknown>) => void;
+      once: (name: string, fn: (data: unknown) => void) => void;
+      off?: (name: string, fn: (data: unknown) => void) => void;
+      removeListener?: (name: string, fn: (data: unknown) => void) => void;
+    };
+
+    // 1.19+ form: { transactionId, text } — no assumeCommand
+    const transactionId = (this.tabCompleteTx = (this.tabCompleteTx % 1_000_000) + 1);
+    const cleaned = text.replace(/^\//, "");
+
+    return await new Promise<string[]>((resolve) => {
+      let settled = false;
+      const finish = (matches: string[]) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          if (client.off) client.off("tab_complete", onPacket as never);
+          else if (client.removeListener) client.removeListener("tab_complete", onPacket as never);
+        } catch {
+          /* ignore */
+        }
+        resolve(matches);
+      };
+
+      const onPacket = (data: unknown) => {
+        const d = data as {
+          transactionId?: number;
+          id?: number;
+          matches?: Array<string | { match?: string; item?: string }>;
+        };
+        const tid = d?.transactionId ?? d?.id;
+        if (tid != null && tid !== transactionId) return;
+        const raw = Array.isArray(d?.matches) ? d.matches : [];
+        const matches = raw
+          .map((m) => {
+            if (typeof m === "string") return m;
+            if (m && typeof m === "object") return String(m.match ?? m.item ?? "");
+            return "";
+          })
+          .filter((s) => s.length > 0);
+        finish(matches);
+      };
+
+      const timer = setTimeout(() => finish([]), 900);
+      try {
+        client.once("tab_complete", onPacket);
+        client.write("tab_complete", { transactionId, text: cleaned });
+      } catch {
+        // Fall back to mineflayer helper if write shape differs
+        void bot
+          .tabComplete(cleaned, true, false, 800)
+          .then((matches) => {
+            if (!Array.isArray(matches)) {
+              finish([]);
+              return;
+            }
+            finish(
+              matches
+                .map((m) => {
+                  if (typeof m === "string") return m;
+                  if (m && typeof m === "object" && "match" in m) return String((m as { match: string }).match);
+                  return String(m);
+                })
+                .filter((s) => s.length > 0),
+            );
+          })
+          .catch(() => finish([]));
+      }
+    });
+  }
+
+  /**
+   * Run /homes and wait for 6b6t's show_dialog (or a classic container).
+   * Seeds knownHomes from dialog button labels.
+   */
+  async openHomesGui(): Promise<InventoryView> {
+    const bot = this.requireBot();
+    this.lastHomesDialog = null;
+    if (bot.currentWindow) {
+      try {
+        bot.closeWindow(bot.currentWindow);
+      } catch {
+        /* ignore */
+      }
+    }
+    sendCommand(bot, "homes");
+    await this.waitForHomesUi(3000);
+    return this.getInventory();
+  }
+
+  private waitForHomesUi(ms: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (this.homesWindowWaiter) {
+        clearTimeout(this.homesWindowWaiter.timer);
+        this.homesWindowWaiter.resolve(false);
+      }
+      const timer = setTimeout(() => {
+        this.homesWindowWaiter = null;
+        resolve(Boolean(this.lastHomesDialog || this.bot?.currentWindow));
+      }, ms);
+      this.homesWindowWaiter = {
+        resolve: (v) => {
+          clearTimeout(timer);
+          this.homesWindowWaiter = null;
+          resolve(v);
+        },
+        timer,
+      };
+      if (this.lastHomesDialog || this.bot?.currentWindow) {
+        this.homesWindowWaiter.resolve(true);
+      }
+    });
   }
 
   async manageInventory(command: InvCommand): Promise<InventoryView> {
@@ -1261,11 +1521,15 @@ export class FractalBot extends EventEmitter {
       return;
     }
     this.bot = bot;
+    // Load home names saved for this account (Settings/homes/<user>.json)
+    this.loadHomesFromDisk();
 
     bot.loadPlugin(pathfinder);
     attachAnarchyMod(bot);
     attachProtocolCompat(bot);
     attachVelocityTransfer(bot);
+    // Optional full S→C (and C→S) protocol dump for reverse-engineering
+    this.wireServerListener(bot);
 
     const markGameAuthenticated = (reason: string) => {
       if (generation !== this.joinGeneration) return;
@@ -1366,6 +1630,86 @@ export class FractalBot extends EventEmitter {
     };
     bot.on("messagestr", (message) => emitChatLine(message));
     bot.on("message", (jsonMsg) => emitChatLine(jsonMsg));
+
+    // Learn home names from system chat (sethome confirm, /homes text list, errors)
+    bot.on("messagestr", (message: string) => {
+      if (generation !== this.joinGeneration) return;
+      this.ingestHomesFromChat(String(message || ""));
+    });
+
+    bot.on("windowOpen", (window) => {
+      if (generation !== this.joinGeneration) return;
+      try {
+        const title = stripWindowTitle((window as { title?: unknown }).title);
+        log.info(`Window opened: ${title || "untitled"}`);
+        // Seed homes from named items if this looks like a homes GUI
+        if (/home/i.test(title)) {
+          const slots = (window as { slots?: Array<{ customName?: unknown; displayName?: unknown; name?: unknown } | null> })
+            .slots;
+          if (Array.isArray(slots)) {
+            for (const item of slots) {
+              if (!item) continue;
+              const label = itemText(item.customName) || itemText(item.displayName) || itemText(item.name);
+              if (label && label !== "unknown" && !/^minecraft:/.test(label) && !label.includes(" ")) {
+                this.rememberHome(label);
+              }
+            }
+          }
+        }
+        if (this.homesWindowWaiter) this.homesWindowWaiter.resolve(true);
+        this.emit("window", { open: true, title, inventory: this.getInventory() });
+        this.emit("status", this.getStatus());
+      } catch (e) {
+        log.warn("windowOpen handler", e instanceof Error ? e.message : e);
+      }
+    });
+
+    bot.on("windowClose", () => {
+      if (generation !== this.joinGeneration) return;
+      this.emit("window", { open: false, inventory: this.getInventory() });
+    });
+
+    // 6b6t /homes uses the 1.21 Dialog system (show_dialog), not a chest window
+    const handleShowDialog = (packet: unknown) => {
+      if (generation !== this.joinGeneration) return;
+      try {
+        const parsed = parseHomesDialog(packet);
+        if (!parsed) {
+          log.info("show_dialog received but not a homes dialog (or parse failed)");
+          return;
+        }
+        this.lastHomesDialog = parsed;
+        // Full replace from /homes each time, then persist to disk
+        this.replaceHomes(parsed.homes);
+        log.info(`Homes dialog: ${parsed.homes.length} home(s) (saved)`);
+        if (this.homesWindowWaiter) this.homesWindowWaiter.resolve(true);
+        this.emit("window", {
+          open: true,
+          title: parsed.title,
+          kind: "homesDialog",
+          homes: parsed.homes,
+          inventory: this.getInventory(),
+        });
+        this.emit("status", this.getStatus());
+      } catch (e) {
+        log.warn("show_dialog handler", e instanceof Error ? e.message : e);
+      }
+    };
+    const mcClient = bot._client as { on: (n: string, fn: (...args: unknown[]) => void) => void };
+    try {
+      mcClient.on("show_dialog", (packet: unknown) => handleShowDialog(packet));
+    } catch {
+      /* ignore */
+    }
+    // Backup: some builds only emit the generic packet event
+    try {
+      mcClient.on("packet", (data: unknown, meta: unknown) => {
+        const name = (meta as { name?: string } | undefined)?.name;
+        if (name === "show_dialog") handleShowDialog(data);
+      });
+    } catch {
+      /* ignore */
+    }
 
     this.wireDetection(bot, generation);
 
@@ -1758,6 +2102,7 @@ export class FractalBot extends EventEmitter {
     this.auth?.destroy();
     this.auth = null;
     this.navigator = null;
+    detachServerListener((this.config.profileId || this.config.username || "").toLowerCase());
     const bot = this.bot;
     this.bot = null;
     if (!bot) return;
@@ -1791,6 +2136,32 @@ export class FractalBot extends EventEmitter {
 
   private async runInventory(command: InvCommand): Promise<InventoryView> {
     const bot = this.requireBot();
+    const op = command.op;
+
+    // /homes and other server GUIs: click or close without touching player inventory
+    if (op === "windowClose") {
+      if (bot.currentWindow) {
+        try {
+          bot.closeWindow(bot.currentWindow);
+        } catch {
+          /* already closed */
+        }
+      }
+      return this.getInventory();
+    }
+
+    if (op === "windowClick") {
+      if (!bot.currentWindow) throw new Error("no window open");
+      if (command.slot == null) throw new Error("windowClick needs slot");
+      const mouse = command.mouseButton === 1 ? 1 : 0;
+      // mode 0 = normal click (teleport / select home on 6b6t homes GUI)
+      await bot.clickWindow(command.slot, mouse, 0);
+      // Give the server a tick to process teleport / close the GUI
+      await new Promise((r) => setTimeout(r, 150));
+      return this.getInventory();
+    }
+
+    // Player-inventory ops: close any open container first so slot indices match bot.inventory
     if (bot.currentWindow) {
       try {
         bot.closeWindow(bot.currentWindow);
@@ -1801,7 +2172,6 @@ export class FractalBot extends EventEmitter {
 
     const slot = command.slot;
     const item = slot == null ? bot.heldItem : bot.inventory.slots[slot] ?? null;
-    const op = command.op;
 
     if (op === "swap") {
       if (slot == null || command.to == null) throw new Error("swap needs slot and to");
@@ -1861,6 +2231,61 @@ export class FractalBot extends EventEmitter {
 
     throw new Error(`unknown inventory op ${op}`);
   }
+
+  /**
+   * Extract home names from typical 6b6t / Essentials-style chat lines.
+   * Examples:
+   *   "Home set: base"
+   *   "Your homes (2/3): base, spawn"
+   *   "Homes: base, stash, portal"
+   *   "Teleporting to home base in 15 seconds"
+   *   "Home base deleted"
+   */
+  private ingestHomesFromChat(text: string): void {
+    const t = text.replace(/§[0-9a-fk-or]/gi, "").trim();
+    if (!t) return;
+
+    // sethome confirm
+    let m = t.match(/\b(?:home\s+set|set\s+home|created\s+home|home\s+created)[:\s]+['"]?([A-Za-z0-9_]{1,32})['"]?/i);
+    if (m?.[1]) {
+      this.rememberHome(m[1]);
+      this.persistHomes();
+      return;
+    }
+    m = t.match(/\b(?:you\s+have\s+set\s+your\s+home\s+to|home\s+point\s+set)[:\s]+['"]?([A-Za-z0-9_]{1,32})['"]?/i);
+    if (m?.[1]) {
+      this.rememberHome(m[1]);
+      this.persistHomes();
+      return;
+    }
+
+    // delhome
+    m = t.match(/\b(?:home\s+deleted|deleted\s+home|removed\s+home)[:\s]+['"]?([A-Za-z0-9_]{1,32})['"]?/i);
+    if (m?.[1]) {
+      this.forgetHome(m[1]);
+      return;
+    }
+
+    // Teleporting to named home
+    m = t.match(/\bteleport(?:ing)?\s+to\s+(?:home\s+)?['"]?([A-Za-z0-9_]{1,32})['"]?/i);
+    if (m?.[1] && !/^(you|the|a|spawn)$/i.test(m[1])) {
+      this.rememberHome(m[1]);
+      this.persistHomes();
+    }
+
+    // List lines: "Homes: a, b, c" or "Your homes (3/5): a, b, c"
+    m = t.match(/\bhomes?\s*(?:\([^)]*\))?\s*[:\-–]\s*(.+)$/i);
+    if (m?.[1]) {
+      const parts = m[1].split(/[,|;]+/).map((s) => s.trim()).filter(Boolean);
+      for (const p of parts) {
+        const name = p.replace(/^['"]+|['"]+$/g, "").split(/\s+/)[0];
+        if (name && /^[A-Za-z0-9_]{1,32}$/.test(name) && !/^(you|have|no|none|limit)$/i.test(name)) {
+          this.rememberHome(name);
+        }
+      }
+      this.persistHomes();
+    }
+  }
 }
 
 const ALWAYS_CONSUMABLE = new Set([
@@ -1911,6 +2336,162 @@ function itemText(value: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+/** Strip § formatting and JSON chat components from a window title. */
+function stripWindowTitle(title: unknown): string {
+  const raw = itemText(title) || (typeof title === "string" ? title : "");
+  if (!raw) return "Window";
+  // Remove vanilla § color codes and common JSON chat noise
+  return raw
+    .replace(/§[0-9a-fk-or]/gi, "")
+    .replace(/\{[^}]*"text"\s*:\s*"([^"]*)"[^}]*\}/g, "$1")
+    .trim() || "Window";
+}
+
+/**
+ * Unwrap prismarine/nmp NBT-ish values repeatedly.
+ * Handles `{ type, value }` and the extra `{ data: { type, value } }` wrapper
+ * used by show_dialog on 1.21.11.
+ */
+function nbtUnwrap(node: unknown, depth = 0): unknown {
+  if (node == null || depth > 12) return node;
+  if (typeof node !== "object") return node;
+  const o = node as Record<string, unknown>;
+
+  // { data: { type: "compound", value: {...} } }
+  if ("data" in o && o.data && typeof o.data === "object" && !Array.isArray(o.data)) {
+    const inner = nbtUnwrap(o.data, depth + 1);
+    if (inner !== o.data) return inner;
+  }
+
+  if (typeof o.type === "string" && "value" in o) {
+    if (o.type === "compound") return nbtUnwrap(o.value, depth + 1);
+    if (o.type === "list") {
+      const listPayload = o.value;
+      if (Array.isArray(listPayload)) return listPayload.map((x) => nbtUnwrap(x, depth + 1));
+      if (listPayload && typeof listPayload === "object") {
+        const lp = listPayload as { value?: unknown };
+        if (Array.isArray(lp.value)) return lp.value.map((x) => nbtUnwrap(x, depth + 1));
+      }
+      return nbtUnwrap(listPayload, depth + 1);
+    }
+    return o.value;
+  }
+  return node;
+}
+
+function nbtString(node: unknown): string {
+  const v = nbtUnwrap(node);
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (v && typeof v === "object" && "text" in (v as object)) {
+    return nbtString((v as { text: unknown }).text);
+  }
+  return "";
+}
+
+/** Walk any nested structure and collect NBT-ish string labels near "label" keys. */
+function collectLabelStrings(node: unknown, out: string[], depth = 0): void {
+  if (node == null || depth > 20) return;
+  if (Array.isArray(node)) {
+    for (const x of node) collectLabelStrings(x, out, depth + 1);
+    return;
+  }
+  if (typeof node !== "object") return;
+  const o = node as Record<string, unknown>;
+  if ("label" in o) {
+    const s = nbtString(o.label);
+    if (s) out.push(s);
+  }
+  for (const v of Object.values(o)) collectLabelStrings(v, out, depth + 1);
+}
+
+/**
+ * Parse 6b6t /homes `show_dialog` packet into title + home button labels.
+ * Real shape (1.21.11 / Paper):
+ *   { dialog: { data: { type: "compound", value: {
+ *       type: { value: "minecraft:multi_action" },
+ *       title: { value: "Homes" },
+ *       actions: { type: "list", value: { type: "compound", value: [ { label: { value: "Base" } } ] } }
+ *   }}}}
+ */
+function parseHomesDialog(packet: unknown): { title: string; homes: string[] } | null {
+  if (!packet || typeof packet !== "object") return null;
+  const root = (packet as { dialog?: unknown }).dialog ?? packet;
+
+  let fields: Record<string, unknown> | null = null;
+  const unwrapped = nbtUnwrap(root);
+  if (unwrapped && typeof unwrapped === "object" && !Array.isArray(unwrapped)) {
+    fields = unwrapped as Record<string, unknown>;
+  }
+
+  let typeStr = fields ? nbtString(fields.type) : "";
+  let title = fields ? nbtString(fields.title) : "";
+
+  if (!typeStr || !title) {
+    try {
+      const blob = JSON.stringify(packet);
+      if (/multi_action/i.test(blob)) typeStr = typeStr || "minecraft:multi_action";
+      const tm = blob.match(/"title"\s*:\s*\{\s*"type"\s*:\s*"string"\s*,\s*"value"\s*:\s*"([^"]+)"/);
+      if (tm?.[1]) title = title || tm[1];
+      if (!title && /"Homes"/i.test(blob)) title = "Homes";
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (typeStr && !/multi_action/i.test(typeStr) && !/home/i.test(title || "")) {
+    return null;
+  }
+
+  const homes: string[] = [];
+  const seen = new Set<string>();
+
+  if (fields?.actions != null) {
+    const actionsNode = nbtUnwrap(fields.actions);
+    const actionList = Array.isArray(actionsNode) ? actionsNode : [];
+    for (const action of actionList) {
+      const a = nbtUnwrap(action);
+      if (!a || typeof a !== "object") continue;
+      const label = nbtString((a as { label?: unknown }).label);
+      if (!label || /^(cancel|close|back|exit)$/i.test(label)) continue;
+      if (seen.has(label)) continue;
+      seen.add(label);
+      homes.push(label);
+    }
+  }
+
+  if (!homes.length) {
+    const labels: string[] = [];
+    collectLabelStrings(packet, labels);
+    for (const label of labels) {
+      if (!label || /^(cancel|close|back|exit)$/i.test(label)) continue;
+      if (seen.has(label)) continue;
+      seen.add(label);
+      homes.push(label);
+    }
+  }
+
+  if (!homes.length) {
+    try {
+      const blob = JSON.stringify(packet);
+      const re = /"label"\s*:\s*\{\s*"type"\s*:\s*"string"\s*,\s*"value"\s*:\s*"([^"]+)"/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(blob))) {
+        const label = m[1];
+        if (!label || /^(cancel|close|back|exit)$/i.test(label)) continue;
+        if (seen.has(label)) continue;
+        seen.add(label);
+        homes.push(label);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (!homes.length && !/home/i.test(title || "")) return null;
+  return { title: title || "Homes", homes };
 }
 
 function snapshotItem(item: {

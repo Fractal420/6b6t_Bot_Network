@@ -268,6 +268,15 @@
           <ul id="players" class="list"></ul>
         </div>
 
+        <div class="card-block mc-inv-card" id="homes-window-card" hidden>
+          <div class="pack-head">
+            <h3 class="subhead" id="homes-window-title">Homes</h3>
+            <button type="button" class="btn-quiet" id="homes-window-close" title="Close window">close</button>
+          </div>
+          <p class="hint" id="homes-window-hint">click a home to teleport</p>
+          <div class="homes-grid" id="homes-window-grid"></div>
+        </div>
+
         <div class="card-block mc-inv-card">
           <div class="pack-head">
             <h3 class="subhead">Inventory</h3>
@@ -338,6 +347,7 @@
         <div class="section-head">
           <div>
             <h2>Detection</h2>
+            <p class="hint" id="detect-for">Select a profile first</p>
             <p class="hint">Players entering/leaving render range, end crystals, TNT, explosions, and combat. Times are local.</p>
           </div>
           <button type="button" class="tab-settings-btn" data-open-settings="detect" title="Detection settings">⚙ Settings</button>
@@ -355,7 +365,7 @@
         <div class="section-head">
           <div>
             <h2>Map</h2>
-            <p class="hint">Elytra terrain job for the selected profile</p>
+            <p class="hint" id="map-for">Select a profile first</p>
           </div>
           <button type="button" class="tab-settings-btn" data-open-settings="map" title="Map settings">⚙ Settings</button>
         </div>
@@ -575,7 +585,24 @@
                 </select>
               </label>
 
-              <p class="hint" style="margin-top:0.85rem">Push notifications (this browser / phone). Requires notification permission — same as captcha alerts.</p>
+              <p class="hint" style="margin-top:0.85rem">Debug — packet listener for <strong>this profile only</strong> (Settings/serverlistener-&lt;username&gt;.ndjson)</p>
+              <label>Server packet listener
+                <select name="serverListener">
+                  <option value="false">Off</option>
+                  <option value="true">On</option>
+                </select>
+              </label>
+              <label>Also log client→server packets
+                <select name="serverListenerOutbound">
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </label>
+              <label>Anti-AFK interval (ms)
+                <input name="antiAfkIntervalMs" type="number" min="5000" step="1000" placeholder="60000" />
+              </label>
+
+              <p class="hint" style="margin-top:0.85rem">Push notifications (per profile) (this browser / phone). Requires notification permission — same as captcha alerts.</p>
               <label>Notify while in lobby / auth / queue
                 <select name="notifyInLobby">
                   <option value="false">Off (ignore lobby)</option>

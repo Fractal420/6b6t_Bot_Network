@@ -249,6 +249,13 @@ export function startControlServer(
       });
       return;
     }
+    if (payload.event === "window") {
+      forward("window", {
+        botId: payload.id,
+        ...(data && typeof data === "object" ? (data as object) : { value: data }),
+      });
+      return;
+    }
     forward(payload.event, data);
   });
 
@@ -478,6 +485,14 @@ async function dispatch(fleet: FleetManager, request?: ControlRequest): Promise<
         return { ok: true, data: bot.getInventory() };
       case "inv":
         return { ok: true, data: await bot.manageInventory(request) };
+      case "tabComplete": {
+        const partial = String((request as { partial?: unknown }).partial ?? "");
+        return { ok: true, data: await bot.tabComplete(partial) };
+      }
+      case "homes":
+        return { ok: true, data: bot.getHomes() };
+      case "openHomes":
+        return { ok: true, data: await bot.openHomesGui() };
       case "dump":
         return { ok: true, data: bot.dump() };
       case "view":

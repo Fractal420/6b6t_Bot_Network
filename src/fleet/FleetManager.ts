@@ -139,6 +139,7 @@ export class FleetManager extends EventEmitter {
     const mapMode = p.mapMode || account.features.mapMode || this.baseConfig.mapMode;
     return {
       ...this.baseConfig,
+      profileId: account.id,
       username: account.username,
       password: account.password,
       auth: account.auth,
@@ -162,6 +163,10 @@ export class FleetManager extends EventEmitter {
       detectionTnt: p.detectionTnt ?? this.baseConfig.detectionTnt,
       detectionExplosions: p.detectionExplosions ?? this.baseConfig.detectionExplosions,
       detectionCombat: p.detectionCombat ?? this.baseConfig.detectionCombat,
+      // Packet listener is per-profile only (never inherits a global “on” for other accounts)
+      serverListener: p.serverListener === true,
+      serverListenerOutbound: p.serverListenerOutbound !== false,
+      serverListenerPath: "",
     };
   }
 
@@ -478,11 +483,12 @@ export class FleetManager extends EventEmitter {
       );
     }
 
-    // Anti-AFK: skip ticks while map or hunt owns movement
+    // Anti-AFK: skip ticks while map or hunt owns movement (interval from this profile)
     if (f.antiAfk) {
+      const intervalMs = Math.max(5_000, account.profile?.antiAfkIntervalMs || 60_000);
       handles.push(
         startAntiAfk(() => this.bots.get(id)?.raw ?? null, label, {
-          intervalMs: 60_000,
+          intervalMs,
           shouldRun: () => {
             const acc = this.accounts.find((a) => a.id === id);
             if (!acc) return false;

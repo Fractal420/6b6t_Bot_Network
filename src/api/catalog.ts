@@ -29,7 +29,8 @@ export const API_ROUTES: ApiRoute[] = [
   { method: "POST", path: "/v1/rpc", auth: true, action: "place", desc: "place held block against a face", body: { face: "up" } },
   { method: "POST", path: "/v1/rpc", auth: true, action: "activate", desc: "right-click a block (chest, door, lever)" },
   { method: "POST", path: "/v1/rpc", auth: true, action: "swing", desc: "swing the arm" },
-  { method: "POST", path: "/v1/rpc", auth: true, action: "inv", desc: "hold | drop | dropStack | equip | unequip | use | swap", body: { op: "hold", slot: 36 } },
+  { method: "POST", path: "/v1/rpc", auth: true, action: "inv", desc: "hold | drop | dropStack | equip | unequip | use | swap | windowClick | windowClose", body: { op: "hold", slot: 36 } },
+  { method: "POST", path: "/v1/rpc", auth: true, action: "tabComplete", desc: "server tab-complete for partial command (e.g. home names)", body: { partial: "home " } },
   { method: "POST", path: "/v1/rpc", auth: true, action: "chat", desc: "send chat", body: { message: "hi" } },
   { method: "POST", path: "/v1/rpc", auth: true, action: "command", desc: "slash command without /", body: { command: "home" } },
   { method: "POST", path: "/v1/rpc", auth: true, action: "join", desc: "connect / rejoin" },
@@ -48,8 +49,8 @@ export function apiCatalog() {
     routes: API_ROUTES,
     movement: ["control", "jump", "stop", "goto", "look", "lookAt", "turn"],
     viewport: ["view", "voxels", "map", "block", "cursor", "dump", "entities", "players"],
-    inventory: ["inventory", "inv"],
+    inventory: ["inventory", "inv", "tabComplete"],
     session: ["join", "leave", "reconnect", "respawn", "status", "set", "hunt", "unhunt"],
-    interact: ["attack", "dig", "stopDig", "place", "activate", "swing", "chat", "command"],
+    interact: ["attack", "dig", "stopDig", "place", "activate", "swing", "chat", "command", "tabComplete"],
   };
 }

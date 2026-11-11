@@ -29,6 +29,8 @@ function envNumber(name: string, fallback: number): number {
 export type AuthMode = "offline" | "microsoft";
 
 export interface FractalConfig {
+  /** Fleet profile id — homes and per-profile debug are keyed by this. */
+  profileId?: string;
   host: string;
   /** Ordered failover list; first entry is preferred host. */
   hosts: string[];
@@ -73,6 +75,15 @@ export interface FractalConfig {
   discordToken: string;
   discordChannelId: string;
   discordMirrorLogs: boolean;
+  /**
+   * When true, every server→client protocol packet is appended to
+   * Settings/serverlistener.ndjson (for debugging tab-complete, GUIs, etc.).
+   */
+  serverListener: boolean;
+  /** Also log client→server packets when serverListener is on. */
+  serverListenerOutbound: boolean;
+  /** Override path for the NDJSON dump (default: Settings/serverlistener.ndjson). */
+  serverListenerPath: string;
 }
 
 export function loadConfig(overrides: Partial<FractalConfig> = {}): FractalConfig {
@@ -119,6 +130,10 @@ export function loadConfig(overrides: Partial<FractalConfig> = {}): FractalConfi
     discordToken: envString("DISCORD_TOKEN", ""),
     discordChannelId: envString("DISCORD_CHANNEL_ID", ""),
     discordMirrorLogs: envString("DISCORD_MIRROR_LOGS", "1") === "1",
+    // Packet listener is per-profile only (AccountProfile.serverListener)
+    serverListener: false,
+    serverListenerOutbound: true,
+    serverListenerPath: "",
   };
   if (!config.hosts.length) config.hosts = [config.host];
   if (!config.host) config.host = config.hosts[0];
