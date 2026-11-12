@@ -6,7 +6,6 @@ Offline join with stored `/login`, dual-portal lobby navigation, auto-rejoin wit
 
 > Made by **Fractal42O** for the **6b6t** community.
 
-**Changelog:** [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
