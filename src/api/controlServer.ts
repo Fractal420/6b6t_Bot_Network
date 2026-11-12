@@ -556,6 +556,117 @@ async function dispatch(fleet: FleetManager, request?: ControlRequest): Promise<
       case "mapConfig":
         if (request.mapping) bot.setMappingConfig(request.mapping);
         return { ok: true, data: bot.getMappingStatus() };
+      case "huntStart": {
+        const result = bot.startHunt((request as { huntConfig?: Record<string, unknown> }).huntConfig as never);
+        return { ok: true, data: { result, status: bot.huntStatus() } };
+      }
+      case "huntStop": {
+        const result = bot.stopHunt();
+        return { ok: true, data: { result, status: bot.huntStatus() } };
+      }
+      case "huntPause":
+        return { ok: true, data: { result: bot.pauseHunt(), status: bot.huntStatus() } };
+      case "huntResume":
+        return { ok: true, data: { result: bot.resumeHunt(), status: bot.huntStatus() } };
+      case "huntStatus":
+        return { ok: true, data: bot.huntStatus() };
+      case "elytraStatus":
+        return { ok: true, data: bot.elytraStatus() };
+      case "elytraReplace": {
+        const result = await bot.replaceElytra();
+        return { ok: true, data: { result, status: bot.elytraStatus() } };
+      }
+      case "mendingStatus":
+        return { ok: true, data: { candidates: bot.mendingStatus(), target: bot.mendingTarget() } };
+      case "survivalStatus":
+        return { ok: true, data: bot.survivalStatus() };
+      case "echestStatus": {
+        const result = await bot.echestStatus();
+        return { ok: true, data: result };
+      }
+      case "webhookTest":
+        return { ok: true, data: { result: bot.webhookTest() } };
+      case "huntConfig":
+        if ((request as { huntConfig?: unknown }).huntConfig) {
+          bot.setHuntConfig((request as { huntConfig: Record<string, unknown> }).huntConfig as never);
+        }
+        return { ok: true, data: { status: bot.huntStatus(), config: bot.huntConfig() } };
+      case "huntRouteSet": {
+        const waypoints = (request as { waypoints?: Array<{ x: number; z: number }> }).waypoints ?? [];
+        const count = bot.setHuntRoute(waypoints);
+        return { ok: true, data: { count, route: bot.huntRoute() } };
+      }
+      case "huntRouteList":
+        return { ok: true, data: { route: bot.huntRoute() } };
+      case "huntRestock": {
+        const result = await bot.huntRestock();
+        return { ok: true, data: { result, status: bot.huntStatus() } };
+      }
+      case "stashList": {
+        const db = bot.huntDatabase();
+        if (!db) return { ok: true, data: { stashes: [], total: 0 } };
+        const rows = db.searchStashes((request as { search?: never }).search);
+        return { ok: true, data: { stashes: rows, total: rows.length } };
+      }
+      case "stashNearby": {
+        const db = bot.huntDatabase();
+        if (!db) return { ok: true, data: { stashes: [], total: 0 } };
+        const pos = bot.getStatus().position;
+        const stashes = [...db.getStashes()]
+          .map((s) => ({ ...s, distance: pos ? Math.round(Math.hypot(s.x - pos.x, s.z - pos.z)) : -1 }))
+          .sort((a, b) => a.distance - b.distance)
+          .slice(0, 25);
+        return { ok: true, data: { stashes, total: db.getStashes().length } };
+      }
+      case "playerList": {
+        const db = bot.huntDatabase();
+        if (!db) return { ok: true, data: { players: [], total: 0 } };
+        const text = (request as { query?: string }).query ?? "";
+        const players = db.searchPlayers(text, 100);
+        return { ok: true, data: { players, total: db.getPlayers().length } };
+      }
+      case "huntDatabaseExport": {
+        const db = bot.huntDatabase();
+        if (!db) return { ok: false, error: "hunt database not initialised (start hunting once)" };
+        return { ok: true, data: { document: db.exportJson(), stats: db.stats() } };
+      }
+      case "huntDatabaseImport": {
+        const db = bot.huntDatabase();
+        if (!db) return { ok: false, error: "hunt database not initialised (start hunting once)" };
+        const document = (request as { document?: string }).document;
+        if (!document) return { ok: false, error: "missing document" };
+        const counts = db.importJson(document, "merge");
+        return { ok: true, data: { counts, stats: db.stats() } };
+      }
+      case "kitBotStart": {
+        const result = bot.startKitBot((request as { kitConfig?: Record<string, unknown> }).kitConfig as never);
+        return { ok: true, data: { result, status: bot.kitBotStatus(), config: bot.kitBotConfig() } };
+      }
+      case "kitBotStop": {
+        const result = bot.stopKitBot();
+        return { ok: true, data: { result, status: bot.kitBotStatus() } };
+      }
+      case "kitBotStatus":
+        return { ok: true, data: { active: bot.isKitBotActive(), status: bot.kitBotStatus(), config: bot.kitBotConfig() } };
+      case "kitBotConfig": {
+        const patch = (request as { kitConfig?: Record<string, unknown> }).kitConfig;
+        if (patch) bot.setKitBotConfig(patch as never);
+        return { ok: true, data: { status: bot.kitBotStatus(), config: bot.kitBotConfig() } };
+      }
+      case "kitBotServe": {
+        const { username, kit } = request as { username: string; kit?: string };
+        if (!username) return { ok: false, error: "missing username" };
+        const result = await bot.serveKit(username, kit);
+        return { ok: true, data: { result, status: bot.kitBotStatus() } };
+      }
+      case "kitBotStock": {
+        const kit = (request as { kit?: string }).kit;
+        return { ok: true, data: { stock: bot.kitBotStock(kit) } };
+      }
+      case "kitBotResetCooldowns": {
+        const result = bot.resetKitBotCooldowns();
+        return { ok: true, data: { result, status: bot.kitBotStatus() } };
+      }
       case "getSettings": {
         const { getSettingsSnapshot } = await import("../config.ts");
         return { ok: true, data: getSettingsSnapshot() };
