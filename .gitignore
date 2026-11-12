@@ -23,4 +23,4 @@ Settings/serverlistener*.ndjson
 Settings/homes/
 Settings/homes/*.json
 Settings/hunt/
-Settings/hunt-export.json
+Settings/hunt-export.json.openhands/
