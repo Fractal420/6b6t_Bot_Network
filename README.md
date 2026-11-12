@@ -2,7 +2,7 @@
 
 Mineflayer control system for the **6b6t** anarchy server.
 
-Offline-account join with stored `/login`, dual-portal lobby navigation, auto-rejoin with captcha handling, multi-account fleet, elytra terrain mapping (Xaero regions), a CLI with tab completion, a web dashboard, and an HTTP/WebSocket control API.
+Offline join with stored `/login`, dual-portal lobby navigation, auto-rejoin with captcha handling, multi-account fleet, elytra mapping (Xaero), CLI, web dashboard, and HTTP/WebSocket control API.
 
 > Made by **Fractal42O** for the **6b6t** community.
 
@@ -10,28 +10,40 @@ Offline-account join with stored `/login`, dual-portal lobby navigation, auto-re
 
 ## Features
 
-- **Offline join** — credentials in `Settings/`; password is never prompted at runtime
-- **Lobby navigation** — auto-walk the two server portals out of the lobby
-- **Auto-reconnect** — exponential backoff; longer cooldown (or halt) on captcha / rate-limit kicks
-- **Captcha alerts** — browser notifications + optional Discord mirror
-- **CLI** — join, chat, movement, inventory, map, hunt, base hunting, shell with tab completion
-- **Web dashboard** — cyberpunk control UI (fleet, live view, hunt, settings, activity log)
-- **Control API** — HTTP + WebSocket RPC for external tools / UIs
-- **Fleet** — multiple accounts with per-bot features: online, hunt, map, announcements, anti-AFK
-- **Elytra mapper** — flight + Xaero region writer (box / spawn / ring / direction modes)
-- **Base hunting** — autonomous exploration: elytra flight, stash scanning, ender-chest restocking, Mending, survival guard, persistent per-server database
-- **Kit bot** — hand items out to players who type a chat prefix (`!kit`); prefix-gated, proximity/cooldown/rate-limited, drops real items only
-- **Optional Discord** — remote `!status`, `!chat`, `!map`, `!bh …`, `!kibot …`, etc.
+### Top bar
 
-> The base-hunting subsystem is documented in depth in **[docs/BASE_HUNTING.md](docs/BASE_HUNTING.md)**.
-> The kit bot is documented in **[docs/KIT_BOT.md](docs/KIT_BOT.md)**.
+| Control | Role |
+|---------|------|
+| **Profile switcher** | Select the active account. **Manage** opens Fleet: add/remove profiles, start/stop bots, per-bot flags (online, hunt, map, announcements, anti-AFK). Profiles live in `Settings/Profiles/`. |
+| **Home (Play)** | Connection toggles (Online, Anti-AFK, Captcha notify, Auto lobby), live status (world, XYZ, ping, HP/food), nearby players, homes, inventory, 3D view, goto/wire. |
+| **Settings** | Process (control API host/port/token) and Connection overrides for the selected profile (host, auth, reconnect, captcha cooldown, etc.). Module options stay on their own tabs. |
+| **Log** | Activity feed: joins, kicks, captcha, hunt/kit events, errors. |
+
+### Modules
+
+Sidebar modules (CLI and Discord expose the same surfaces). Details live in `docs/`:
+
+| Module | Summary | Docs |
+|--------|---------|------|
+| **Map** | Elytra terrain survey; writes Xaero regions (box / spawn / ring / direction). | [docs/MAP.md](docs/MAP.md) |
+| **Detect** | Players, crystals, combat events, optional browser alerts. | [docs/DETECT.md](docs/DETECT.md) |
+| **Announce** | Timed chat messages from `Settings/announcements.json`. | [docs/ANNOUNCE.md](docs/ANNOUNCE.md) |
+| **Hunt** | Autonomous base hunting: routes, stash scan, restock, Mending, survival. | [docs/BASE_HUNTING.md](docs/BASE_HUNTING.md) |
+| **Kit Bot** | Serve real inventory kits on a chat prefix (`!kit`). | [docs/KIT_BOT.md](docs/KIT_BOT.md) |
+
+### Core platform
+
+- Offline (or Microsoft) join; credentials never prompted at runtime
+- Dual-portal lobby navigation and auto-reconnect with captcha handling
+- CLI with tab completion; control API (`POST /v1/rpc`, `WS /v1/events`)
+- Optional Discord remote control and log mirror
 
 ---
 
 ## Requirements
 
 - **Node.js ≥ 20**
-- Offline Minecraft account that can join 6b6t (or Microsoft auth if configured)
+- Offline Minecraft account that can join 6b6t (or Microsoft auth)
 
 ---
 
@@ -41,15 +53,14 @@ Offline-account join with stored `/login`, dual-portal lobby navigation, auto-re
 npm install
 ```
 
-Configuration lives under **`Settings/`**:
-
 | Path | Purpose |
 |------|---------|
-| `Settings/settings.json` | Global options (host, control API, reconnect, map, Discord, …) |
-| `Settings/Profiles/<id>.json` | One file per account (credentials + features + overrides) |
+| `Settings/settings.json` | Global options (host, control API, reconnect, Discord, …) |
+| `Settings/Profiles/<id>.json` | Per-account credentials, features, overrides |
 | `Settings/announcements.json` | Default timed chat messages |
+| `Settings/hunt/<server>/` | Hunt config + database |
 
-On first run, a legacy `.env` / `accounts.json` is migrated if present.
+Legacy `.env` / `accounts.json` migrate on first run.
 
 Minimal `Settings/settings.json`:
 
@@ -73,112 +84,33 @@ Optional CLI on PATH:
 
 ```bash
 npm link
-eval "$(fractalbot completion zsh)"   # or: fractalbot completion bash
+eval "$(fractalbot completion zsh)"   # or bash
 ```
 
 ---
 
 ## Usage
 
-### Start (dashboard + control API)
-
 ```bash
-npm start
-# or
-fractalbot
-```
+npm start                 # dashboard + API → http://127.0.0.1:20972
+fractalbot join           # join + shell
+fractalbot join --daemon  # background
 
-Open the dashboard at `http://127.0.0.1:20972` (port from `CONTROL_PORT`).
-
-### CLI essentials
-
-```bash
-fractalbot join              # join + /login, then interactive shell
-fractalbot join --daemon     # join and keep running in background
 fractalbot status
 fractalbot chat hello
-fractalbot cmd home
-fractalbot map               # ASCII top-down of the area
-fractalbot hunt              # walk server portals out of lobby
-fractalbot unhunt
-fractalbot leave
-
-fractalbot map-start box     # elytra map: box | spawn | ring | north | ...
-fractalbot map-status
-fractalbot map-stop
-
-fractalbot bh start spiral   # autonomous base hunting: grid | spiral | adaptive | direction
-fractalbot bh status
-fractalbot bh stash          # nearest recorded stashes
-fractalbot bh restock        # restock from the nearest ender chest
-fractalbot bh stop
-
-fractalbot kibot start       # serve kits to players who type `!kit`
-fractalbot kibot status
-fractalbot kibot give Steve  # hand a kit out now
-fractalbot kibot stop
+fractalbot map-start box | map-status | map-stop
+fractalbot bh start spiral | bh status | bh stop
+fractalbot kibot start | kibot status | kibot stop
 ```
 
-Other useful commands: `goto`, `look`, `walk`, `stop`, `attack`, `dig`, `inv`, `players`, `view`, `shell`, `completion`.
+Other commands: `goto`, `look`, `walk`, `inv`, `players`, `view`, `shell`, `completion`.
 
-See **[docs/BASE_HUNTING.md](docs/BASE_HUNTING.md)** for the full `bh` command set, the hunt config, and
-how the autonomous controller schedules flight, scanning, Mending and ender-chest restocking.
-See **[docs/KIT_BOT.md](docs/KIT_BOT.md)** for the kit bot, its safety gates and its config.
+**Discord (optional):** `npm install discord.js`, set `DISCORD_*` in settings, enable Message Content Intent. Commands: `!status`, `!chat`, `!map`, `!bh …`, `!kibot …`, etc.
 
-### Discord (optional)
+**API:** `POST /v1/rpc` with `{ "action": "...", ... }` (token if `CONTROL_TOKEN` is set); events on `WS /v1/events`.
 
 ```bash
-npm install discord.js
-```
-
-In `Settings/settings.json`:
-
-```json
-"DISCORD_ENABLED": "1",
-"DISCORD_TOKEN": "your_bot_token",
-"DISCORD_CHANNEL_ID": "123456789012345678",
-"DISCORD_MIRROR_LOGS": "1"
-```
-
-Enable **Message Content Intent** for the bot. Commands: `!help`, `!status`, `!join` / `!leave`, `!chat`, `!cmd`, `!hunt`, `!map on|off|status`, `!captcha`.
-
-### Fleet
-
-Each account is a profile under `Settings/Profiles/`. Use the dashboard **Fleet** panel (or API) to add accounts, toggle features (online / hunt / map / announcements / anti-AFK), and start/stop bots.
-
-### Programmatic use
-
-```ts
-import { FractalBot } from "fractalbot";
-import { loadConfig } from "fractalbot/config";
-
-const bot = new FractalBot(loadConfig());
-await bot.join();
-```
-
-Control API: `POST /v1/rpc` with JSON body `{ "action": "...", ... }` (token required if `CONTROL_TOKEN` is set). Event stream: WebSocket `/v1/events`.
-
----
-
-## Run
-
-```bash
-npm install
-npm start
-```
-
-Opens the control API + web dashboard (default `http://127.0.0.1:20972`).
-
-```bash
-fractalbot join              # join and open interactive shell
-fractalbot join --daemon     # join and keep running in background
-```
-
-Optional checks:
-
-```bash
-npm run typecheck
-npm test
+npm run typecheck && npm test
 ```
 
 ---
@@ -186,8 +118,6 @@ npm test
 ## Credits & Inspiration
 
 **Made by [Fractal42O](https://github.com/Fractal42O) for the 6b6t community.**
-
-Built on and inspired by:
 
 | Project | Link |
 |---------|------|
