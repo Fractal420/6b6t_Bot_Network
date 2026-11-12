@@ -67,8 +67,18 @@ test("picks the nearer vanilla portal and ignores a closer decorative wall", () 
   assert.equal(picked.distance, 9);
 });
 
-test("returns null when the only portal blocks are a decorative wall", () => {
-  assert.equal(pickServerPortal(decorativeWall(2), "lobby", true), null);
+test("accepts a lone large portal wall when no vanilla interior is present", () => {
+  // 6b6t's second lobby portal is a large custom wall; the picker must still
+  // return a usable target rather than null (regression for b89b374).
+  const picked = pickServerPortal(decorativeWall(2), "lobby", true);
+  assert.ok(picked);
+  assert.equal(picked.kind, "server");
+  assert.equal(picked.position.x, 1.5);
+  assert.equal(picked.position.z, 6);
+});
+
+test("returns null when there are no nether_portal blocks at all", () => {
+  assert.equal(pickServerPortal([], "lobby", true), null);
 });
 
 test("does not treat survival nether portals as lobby exits", () => {

@@ -170,6 +170,8 @@ export interface BotStatus {
   huntingPortal: boolean;
   /** Elytra mapper snapshot. */
   mapping?: unknown;
+  /** Base-hunting controller snapshot, or null when hunting has never started. */
+  hunt?: unknown;
 }
 
 /** Payload from prismarine-auth / mineflayer onMsaCode. */
@@ -318,6 +320,8 @@ export interface FractalBotEvents {
   detection: (event: DetectionEvent) => void;
   /** Microsoft device code ready for the user to enter at verification_uri. */
   msaCode: (code: MsaDeviceCode) => void;
+  /** Base-hunting notification (stash found, emergency, …). */
+  huntNotification: (notification: unknown) => void;
 }
 
 export type DetectionKind =
@@ -394,6 +398,26 @@ export type ControlRequest =
   | { action: "mapStop" }
   | { action: "mapStatus" }
   | { action: "mapConfig"; mapping?: Record<string, unknown> }
+  | { action: "huntStart"; huntConfig?: Record<string, unknown> }
+  | { action: "huntStop" }
+  | { action: "huntPause" }
+  | { action: "huntResume" }
+  | { action: "huntStatus" }
+  | { action: "huntConfig"; huntConfig?: Record<string, unknown> }
+  | { action: "huntRouteSet"; waypoints?: Array<{ x: number; z: number }> }
+  | { action: "huntRouteList" }
+  | { action: "huntRestock" }
+  | { action: "elytraStatus" }
+  | { action: "elytraReplace" }
+  | { action: "mendingStatus" }
+  | { action: "survivalStatus" }
+  | { action: "echestStatus" }
+  | { action: "webhookTest" }
+  | { action: "stashList"; search?: { tier?: string; dimension?: string; minScore?: number; text?: string; limit?: number } }
+  | { action: "stashNearby" }
+  | { action: "playerList"; query?: string }
+  | { action: "huntDatabaseExport" }
+  | { action: "huntDatabaseImport"; document?: string }
   | { action: "getSettings" }
   | { action: "saveSettings"; values: Record<string, string> }
   | { action: "fleetStatus" }
@@ -448,6 +472,7 @@ export type ControlRequest =
       action: "fleetSetAnnouncements";
       announcements: { message: string; intervalMs: number }[];
     }
+  | { action: "fleetMicrosoftAuth"; id: string }
   | { action: "set"; autoReconnect?: boolean; autoLobby?: boolean }
   | { action: "catalog" };
 
