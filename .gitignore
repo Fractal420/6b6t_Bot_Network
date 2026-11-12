@@ -22,3 +22,5 @@ Settings/serverlistener.ndjson
 Settings/serverlistener*.ndjson
 Settings/homes/
 Settings/homes/*.json
+Settings/hunt/
+Settings/hunt-export.json

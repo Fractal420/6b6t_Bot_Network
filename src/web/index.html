@@ -536,6 +536,99 @@
         </div>
       </section>
 
+      <!-- ========== HUNT (autonomous base hunting) ========== -->
+      <section class="panel hunt-panel tab-panel" id="hunt-panel" data-tab="hunt" role="tabpanel" hidden>
+        <div class="section-head">
+          <div>
+            <h2>Base Hunt</h2>
+            <p class="hint" id="hunt-for">Select a profile first</p>
+          </div>
+          <span class="pill" id="hunt-phase" data-tone="neutral">idle</span>
+        </div>
+
+        <div class="card-block">
+          <div class="hunt-controls">
+            <label class="map-mode-row">Mode
+              <select id="hunt-mode">
+                <option value="spiral">Spiral</option>
+                <option value="grid">Grid</option>
+                <option value="adaptive">Adaptive</option>
+                <option value="direction">Direction</option>
+                <option value="waypoints">Waypoints</option>
+              </select>
+            </label>
+            <div class="hunt-buttons">
+              <button type="button" id="hunt-start" class="primary">Start</button>
+              <button type="button" id="hunt-pause">Pause</button>
+              <button type="button" id="hunt-resume">Resume</button>
+              <button type="button" id="hunt-stop" class="danger">Stop</button>
+              <button type="button" id="hunt-restock">Restock</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card-block">
+          <h3>Status</h3>
+          <div class="hunt-status" id="hunt-status">
+            <div><dt>phase</dt><dd id="hs-phase">—</dd></div>
+            <div><dt>mode</dt><dd id="hs-mode">—</dd></div>
+            <div><dt>flight</dt><dd id="hs-flight">—</dd></div>
+            <div><dt>elytra</dt><dd id="hs-elytra">—</dd></div>
+            <div><dt>spares</dt><dd id="hs-spares">—</dd></div>
+            <div><dt>target</dt><dd id="hs-target">—</dd></div>
+            <div><dt>waypoint</dt><dd id="hs-waypoint">—</dd></div>
+            <div><dt>explored</dt><dd id="hs-explored">—</dd></div>
+            <div><dt>stashes</dt><dd id="hs-stashes">—</dd></div>
+            <div><dt>players</dt><dd id="hs-players">—</dd></div>
+            <div><dt>health</dt><dd id="hs-health">—</dd></div>
+            <div><dt>food</dt><dd id="hs-food">—</dd></div>
+            <div><dt>totems</dt><dd id="hs-totems">—</dd></div>
+            <div><dt>fireworks</dt><dd id="hs-fireworks">—</dd></div>
+            <div><dt>free slots</dt><dd id="hs-free">—</dd></div>
+          </div>
+          <p class="hint" id="hunt-notes">No notes.</p>
+        </div>
+
+        <div class="card-block">
+          <div class="hunt-tables">
+            <div>
+              <h3>Stashes <span class="mute" id="hunt-stash-count"></span></h3>
+              <ul class="hunt-list" id="hunt-stash-list"></ul>
+            </div>
+            <div>
+              <h3>Players <span class="mute" id="hunt-player-count"></span></h3>
+              <ul class="hunt-list" id="hunt-player-list"></ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="card-block">
+          <h3>Equipment &amp; survival</h3>
+          <div class="hunt-buttons">
+            <button type="button" id="hunt-elytra-status">Elytra status</button>
+            <button type="button" id="hunt-elytra-replace">Replace elytra</button>
+            <button type="button" id="hunt-mending">Mending status</button>
+            <button type="button" id="hunt-survival">Survival status</button>
+            <button type="button" id="hunt-echest">Read ender chest</button>
+            <button type="button" id="hunt-webhook">Test webhook</button>
+          </div>
+          <pre class="hunt-output" id="hunt-equipment-output">—</pre>
+        </div>
+
+        <div class="card-block">
+          <h3>Custom route (chunk coordinates)</h3>
+          <label class="map-mode-row">Waypoints
+            <input type="text" id="hunt-route-input" placeholder="12,34 40,60 -8,100" />
+          </label>
+          <div class="hunt-buttons">
+            <button type="button" id="hunt-route-set">Set route</button>
+            <button type="button" id="hunt-route-list">List route</button>
+            <button type="button" id="hunt-route-clear">Clear route</button>
+          </div>
+          <p class="hint" id="hunt-route-hint">Waypoints are chunk coordinates (x,z). Set switches to waypoints mode.</p>
+        </div>
+      </section>
+
       <!-- ========== SETTINGS (general / process + dashboard) ========== -->
       <section class="panel settings tab-panel" id="settings-panel" data-tab="settings" role="tabpanel" hidden>
         <div class="settings-head">

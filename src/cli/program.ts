@@ -1,5 +1,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
+import fs from "node:fs";
+import path from "node:path";
 import { assertJoinConfig, loadConfig, type FractalConfig } from "../config.ts";
 import { FractalBot } from "../api/FractalBot.ts";
 import { startControlServer } from "../api/controlServer.ts";
@@ -274,6 +276,8 @@ export async function runCli(argv = process.argv): Promise<void> {
       await proxyOrFail(loadConfig(), { action: "mapStatus" });
     });
 
+  registerHuntCommands(program, loadConfig);
+
   program
 
   program
@@ -442,6 +446,190 @@ async function proxyOrFail(config: FractalConfig, request: ControlRequest) {
   printResult(result);
   if (!result.ok) process.exitCode = 1;
   return result;
+}
+
+/**
+ * `/bh` — autonomous base hunting. Every subcommand proxies to the running bot over the control API, so the
+ * CLI never drives a bot directly. Explorer modes: grid, spiral, adaptive, direction.
+ */
+function registerHuntCommands(program: Command, loadConfig: () => FractalConfig): void {
+  const bh = program.command("bh").description("Autonomous base hunting (explore, stash, elytra, echest)");
+
+  bh.command("status")
+    .description("Show hunt phase, target, elytra and survival")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "huntStatus" });
+    });
+
+  bh.command("start")
+    .description("Start base hunting")
+    .argument("[mode]", "explore mode: grid | spiral | adaptive | direction", "spiral")
+    .option("-s, --spacing <chunks>", "route spacing in chunks")
+    .option("-n, --half <count>", "route half-size in chunks")
+    .action(async (mode: string, opts: { spacing?: string; half?: string }) => {
+      const huntConfig: Record<string, unknown> = { mode };
+      if (opts.spacing) huntConfig.spacing = Number(opts.spacing);
+      if (opts.half) huntConfig.halfCount = Number(opts.half);
+      await proxyOrFail(loadConfig(), { action: "huntStart", huntConfig });
+    });
+
+  bh.command("stop").description("Stop base hunting (saves progress)").action(async () => {
+    await proxyOrFail(loadConfig(), { action: "huntStop" });
+  });
+
+  bh.command("pause").description("Pause base hunting").action(async () => {
+    await proxyOrFail(loadConfig(), { action: "huntPause" });
+  });
+
+  bh.command("resume").description("Resume base hunting").action(async () => {
+    await proxyOrFail(loadConfig(), { action: "huntResume" });
+  });
+
+  bh.command("explore")
+    .description("Change the explore mode live, or show the current route status")
+    .argument("[mode]", "grid | spiral | adaptive | direction | waypoints | status", "status")
+    .action(async (mode: string) => {
+      if (!mode || mode === "status") {
+        await proxyOrFail(loadConfig(), { action: "huntStatus" });
+        return;
+      }
+      await proxyOrFail(loadConfig(), { action: "huntConfig", huntConfig: { mode } });
+    });
+
+  bh.command("restock")
+    .description("Restock from the nearest ender chest using the configured categories")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "huntRestock" });
+    });
+
+  const elytra = bh.command("elytra").description("Elytra status and replacement");
+  elytra
+    .command("status")
+    .description("Show the worn elytra durability and spare count")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "elytraStatus" });
+    });
+  elytra
+    .command("replace")
+    .description("Equip the healthiest viable spare elytra")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "elytraReplace" });
+    });
+  elytra
+    .command("repair")
+    .description("Show damaged Mending equipment and the current repair target")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "mendingStatus" });
+    });
+
+  bh.command("survival")
+    .description("Show health, hunger, armour, totems, food, fireworks and capacity")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "survivalStatus" });
+    });
+
+  bh.command("echest")
+    .description("Open the nearest ender chest and read its contents")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "echestStatus" });
+    });
+
+  const webhook = bh.command("webhook").description("Send a test notification through the webhook path");
+  webhook.action(async () => {
+    await proxyOrFail(loadConfig(), { action: "webhookTest" });
+  });
+  webhook
+    .command("test")
+    .description("Send a test notification (alias for `bh webhook`)")
+    .action(async () => {
+      await proxyOrFail(loadConfig(), { action: "webhookTest" });
+    });
+
+  const route = bh.command("route").description("Custom waypoint route (chunk coordinates)");
+  route
+    .command("add")
+    .description("Add waypoints as x,z pairs, e.g. `bh route add 12,34 40,60`, or from a file")
+    .argument("[pairs...]", "x,z chunk pairs")
+    .option("-f, --file <file>", "read waypoints from a file (one `x,z` per line)")
+    .action(async (pairs: string[], opts: { file?: string }) => {
+      const waypoints: Array<{ x: number; z: number }> = [];
+      const parse = (text: string) => {
+        for (const token of text.split(/[\s;]+/)) {
+          const m = token.match(/^(-?\d+)[,:](-?\d+)$/);
+          if (m) waypoints.push({ x: Number(m[1]), z: Number(m[2]) });
+        }
+      };
+      if (opts.file) {
+        const resolved = path.resolve(opts.file);
+        if (!fs.existsSync(resolved)) throw new Error(`File not found: ${resolved}`);
+        parse(fs.readFileSync(resolved, "utf8"));
+      }
+      if (pairs?.length) parse(pairs.join(" "));
+      if (!waypoints.length) throw new Error("No waypoints parsed. Use `x,z` pairs or --file.");
+      await proxyOrFail(loadConfig(), { action: "huntRouteSet", waypoints });
+    });
+  route.command("list").description("List the custom waypoint route").action(async () => {
+    await proxyOrFail(loadConfig(), { action: "huntRouteList" });
+  });
+  route.command("clear").description("Clear the custom route and return to spiral mode").action(async () => {
+    await proxyOrFail(loadConfig(), { action: "huntRouteSet", waypoints: [] });
+    await proxyOrFail(loadConfig(), { action: "huntConfig", huntConfig: { mode: "spiral" } });
+  });
+
+  const stash = bh.command("stash").description("Stash database");
+  stash
+    .command("list")
+    .description("List recorded stashes")
+    .option("-t, --tier <tier>", "filter by tier")
+    .option("-d, --dimension <dim>", "filter by dimension")
+    .option("-q, --text <text>", "substring search")
+    .action(async (opts: { tier?: string; dimension?: string; text?: string }) => {
+      await proxyOrFail(loadConfig(), {
+        action: "stashList",
+        search: { tier: opts.tier, dimension: opts.dimension, text: opts.text },
+      });
+    });
+  stash.command("nearby").description("Nearest recorded stashes").action(async () => {
+    await proxyOrFail(loadConfig(), { action: "stashNearby" });
+  });
+
+  const player = bh.command("player").description("Player history database");
+  player
+    .command("list")
+    .description("List known players")
+    .option("-q, --query <text>", "substring search by name")
+    .action(async (opts: { query?: string }) => {
+      await proxyOrFail(loadConfig(), { action: "playerList", query: opts.query });
+    });
+
+  const db = bh.command("database").description("Export / import the hunt database");
+  db.command("export")
+    .description("Write the hunt database to a JSON file")
+    .argument("[file]", "output path", path.join("Settings", "hunt-export.json"))
+    .action(async (file: string) => {
+      const config = loadConfig();
+      const client = controlClient(config);
+      if (!(await client.ping())) throw new Error("Bot is not running. Start it with `fractalbot join`.");
+      const result = await client.rpc({ action: "huntDatabaseExport" });
+      if (!result.ok) {
+        printResult(result);
+        process.exitCode = 1;
+        return;
+      }
+      const document = (result.data as { document?: string }).document ?? "{}";
+      fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+      fs.writeFileSync(path.resolve(file), document);
+      console.log(chalk.green(`Hunt database exported to ${path.resolve(file)}`));
+    });
+  db.command("import")
+    .description("Merge a previously exported hunt database file")
+    .argument("<file>", "input path")
+    .action(async (file: string) => {
+      const resolved = path.resolve(file);
+      if (!fs.existsSync(resolved)) throw new Error(`File not found: ${resolved}`);
+      const document = fs.readFileSync(resolved, "utf8");
+      await proxyOrFail(loadConfig(), { action: "huntDatabaseImport", document });
+    });
 }
 
 function parseInvCommand(opRaw: string, slotRaw?: string, extra?: string): ControlRequest {

@@ -14,12 +14,15 @@ Offline-account join with stored `/login`, dual-portal lobby navigation, auto-re
 - **Lobby navigation** — auto-walk the two server portals out of the lobby
 - **Auto-reconnect** — exponential backoff; longer cooldown (or halt) on captcha / rate-limit kicks
 - **Captcha alerts** — browser notifications + optional Discord mirror
-- **CLI** — join, chat, movement, inventory, map, hunt, shell with tab completion
-- **Web dashboard** — cyberpunk control UI (fleet, live view, settings, activity log)
+- **CLI** — join, chat, movement, inventory, map, hunt, base hunting, shell with tab completion
+- **Web dashboard** — cyberpunk control UI (fleet, live view, hunt, settings, activity log)
 - **Control API** — HTTP + WebSocket RPC for external tools / UIs
 - **Fleet** — multiple accounts with per-bot features: online, hunt, map, announcements, anti-AFK
 - **Elytra mapper** — flight + Xaero region writer (box / spawn / ring / direction modes)
-- **Optional Discord** — remote `!status`, `!chat`, `!map`, etc.
+- **Base hunting** — autonomous exploration: elytra flight, stash scanning, ender-chest restocking, Mending, survival guard, persistent per-server database
+- **Optional Discord** — remote `!status`, `!chat`, `!map`, `!bh …`, etc.
+
+> The base-hunting subsystem is documented in depth in **[docs/BASE_HUNTING.md](docs/BASE_HUNTING.md)**.
 
 ---
 
@@ -101,9 +104,18 @@ fractalbot leave
 fractalbot map-start box     # elytra map: box | spawn | ring | north | ...
 fractalbot map-status
 fractalbot map-stop
+
+fractalbot bh start spiral   # autonomous base hunting: grid | spiral | adaptive | direction
+fractalbot bh status
+fractalbot bh stash          # nearest recorded stashes
+fractalbot bh restock        # restock from the nearest ender chest
+fractalbot bh stop
 ```
 
 Other useful commands: `goto`, `look`, `walk`, `stop`, `attack`, `dig`, `inv`, `players`, `view`, `shell`, `completion`.
+
+See **[docs/BASE_HUNTING.md](docs/BASE_HUNTING.md)** for the full `bh` command set, the hunt config, and
+how the autonomous controller schedules flight, scanning, Mending and ender-chest restocking.
 
 ### Discord (optional)
 
@@ -179,4 +191,3 @@ Built on and inspired by:
 | 6b6t Join Bot | https://github.com/NOSLEEPSMOKE/6b6t-join-bot |
 
 License: MIT — see [LICENSE](LICENSE).
-```

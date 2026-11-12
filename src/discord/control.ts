@@ -90,8 +90,7 @@ export function createDiscordControl(bot: FractalBot, options: DiscordControlOpt
   };
 
   const defaultProfile =
-    String(options.defaultProfile || bot.getStatus()?.username || bot.getStatus()?.label || "bot").trim() ||
-    "bot";
+    String(options.defaultProfile || bot.getStatus()?.username || "bot").trim() || "bot";
 
   const formatLine = (text: string, profile?: string) => {
     const tag = String(profile || defaultProfile).trim() || defaultProfile;
@@ -164,6 +163,18 @@ export function createDiscordControl(bot: FractalBot, options: DiscordControlOpt
         }
         break;
       }
+      case "huntNotification": {
+        const n = a0 as { kind?: string; title?: string; body?: string; data?: Record<string, unknown> } | undefined;
+        if (n?.title) {
+          const where = n.data && typeof n.data.x === "number" ? ` @ ${n.data.x},${n.data.z}` : "";
+          queueLog(`[hunt:${n.kind ?? "info"}] ${n.title}${where}${n.body ? ` — ${n.body}` : ""}`, profile);
+          // Discovery/emergency alerts are worth a prompt flush rather than waiting for the batch window.
+          if (n.kind === "emergency" || n.kind === "major-storage" || n.kind === "stash-discovery") {
+            setTimeout(flush, 500);
+          }
+        }
+        break;
+      }
       case "kicked": {
         const info = a0 as { reason?: string; kind?: string; links?: string[] } | undefined;
         const kind = info?.kind || "kick";
@@ -196,6 +207,17 @@ export function createDiscordControl(bot: FractalBot, options: DiscordControlOpt
       `\`${prefix}join\` / \`${prefix}leave\` / \`${prefix}reconnect\``,
       `\`${prefix}chat <msg>\` / \`${prefix}cmd <command>\``,
       `\`${prefix}hunt\` / \`${prefix}unhunt\` — lobby portals`,
+      `\`${prefix}bh start [mode]\` — autonomous base hunting (spiral, grid, adaptive, direction)`,
+      `\`${prefix}bh stop\` / \`${prefix}bh pause\` / \`${prefix}bh resume\``,
+      `\`${prefix}bh status\` — phase, target, elytra, survival`,
+      `\`${prefix}bh stash\` — nearest recorded stashes`,
+      `\`${prefix}bh restock\` — restock from the nearest ender chest`,
+      `\`${prefix}bh elytra [status|replace]\` — worn elytra durability / swap in a spare`,
+      `\`${prefix}bh mending\` — damaged Mending gear, worst first`,
+      `\`${prefix}bh survival\` — health, food, totems, fireworks, capacity`,
+      `\`${prefix}bh echest\` — read the nearest ender chest`,
+      `\`${prefix}bh route [set x,z …|list|clear]\` — custom waypoint route`,
+      `\`${prefix}bh webhook\` — send a test notification`,
       `\`${prefix}map on [mode]\` — start elytra mapping (box, spawn, ring, north, …)`,
       `\`${prefix}map on box:x1,z1,x2,z2\` — map a box`,
       `\`${prefix}map off\` / \`${prefix}map status\``,
@@ -300,6 +322,142 @@ export function createDiscordControl(bot: FractalBot, options: DiscordControlOpt
         bot.stopPortalHunt();
         reply("portal hunt off");
         break;
+      case "bh": {
+        const parts = arg.trim().split(/\s+/).filter(Boolean);
+        const sub = (parts[0] || "status").toLowerCase();
+        const rest = parts.slice(1).join(" ");
+        if (sub === "start") {
+          const mode = (rest || "spiral") as "spiral" | "grid" | "adaptive" | "direction";
+          reply(await bot.startHunt({ mode }));
+          break;
+        }
+        if (sub === "stop") {
+          reply(bot.stopHunt());
+          break;
+        }
+        if (sub === "pause") {
+          reply(bot.pauseHunt());
+          break;
+        }
+        if (sub === "resume") {
+          reply(bot.resumeHunt());
+          break;
+        }
+        if (sub === "restock") {
+          reply(await bot.huntRestock());
+          break;
+        }
+        if (sub === "elytra") {
+          const action = (parts[1] || "status").toLowerCase();
+          if (action === "replace") {
+            reply(await bot.replaceElytra());
+            break;
+          }
+          const s = bot.elytraStatus();
+          reply(
+            s
+              ? `equipped=${s.equipped} remaining=${s.remaining} spares=${s.spares} bestSpare=${s.bestSpareRemaining}`
+              : "not connected",
+          );
+          break;
+        }
+        if (sub === "mending") {
+          const target = bot.mendingTarget();
+          const rows = bot.mendingStatus();
+          reply(
+            rows.length
+              ? [
+                  target ? `target: ${target.name} (${target.remaining}/${target.maxDamage})` : "target: none",
+                  ...rows.map((c) => `${c.name} slot ${c.slot} ${c.remaining}/${c.maxDamage}`),
+                ].join("\n")
+              : "nothing needs mending",
+          );
+          break;
+        }
+        if (sub === "survival") {
+          const snap = bot.survivalStatus();
+          reply(
+            snap
+              ? `health=${snap.health} food=${snap.food} elytra=${snap.elytraRemaining} totems=${snap.totems} food-items=${snap.foodItems} fireworks=${snap.fireworks} free=${snap.freeSlots}`
+              : "not connected",
+          );
+          break;
+        }
+        if (sub === "echest") {
+          const result = await bot.echestStatus();
+          reply(`${result.ok ? "ok" : "failed"}: ${result.result}${result.items != null ? ` (${result.items} slots)` : ""}`);
+          break;
+        }
+        if (sub === "webhook") {
+          reply(bot.webhookTest());
+          break;
+        }
+        if (sub === "route") {
+          const action = (parts[1] || "list").toLowerCase();
+          if (action === "clear") {
+            bot.setHuntRoute([]);
+            bot.setHuntConfig({ mode: "spiral" });
+            reply("route cleared — back to spiral mode");
+            break;
+          }
+          if (action === "set" || action === "add") {
+            const waypoints: Array<{ x: number; z: number }> = [];
+            for (const token of parts.slice(2)) {
+              const m = token.match(/^(-?\d+)[,:](-?\d+)$/);
+              if (m) waypoints.push({ x: Number(m[1]), z: Number(m[2]) });
+            }
+            if (!waypoints.length) {
+              reply("usage: bh route set x,z x,z … (chunk coordinates)");
+              break;
+            }
+            const count = bot.setHuntRoute(waypoints);
+            reply(`route set: ${count} waypoints`);
+            break;
+          }
+          const route = bot.huntRoute();
+          reply(route.length ? route.map((w) => `${w.x},${w.z}`).join("  ") : "route is empty");
+          break;
+        }
+        if (sub === "stash") {
+          const db = bot.huntDatabase();
+          if (!db) {
+            reply("hunt database not initialised (start hunting once)");
+            break;
+          }
+          const st = bot.getStatus();
+          const pos = st.position;
+          const rows = [...db.getStashes()]
+            .map((s) => ({ ...s, distance: pos ? Math.round(Math.hypot(s.x - pos.x, s.z - pos.z)) : -1 }))
+            .sort((a, b) => a.distance - b.distance)
+            .slice(0, 8);
+          reply(
+            rows.length
+              ? rows.map((s) => `${s.tier} ${s.score} @ ${s.x},${s.z} (${s.distance}b)`).join("\n")
+              : "no stashes recorded yet",
+          );
+          break;
+        }
+        // Default: status
+        {
+          const s = bot.huntStatus();
+          if (!s) {
+            reply("base hunting not started — try `bh start spiral`");
+            break;
+          }
+          reply(
+            [
+              `phase=${s.paused ? "paused" : s.active ? s.phase : "stopped"} mode=${s.mode}`,
+              `flight=${s.flight.state} elytra=${s.flight.elytraRemaining >= 0 ? s.flight.elytraRemaining : "none"} spares=${s.flight.elytraSpares}`,
+              `waypoint=${s.waypointIndex}/${s.waypointsTotal} target=${s.target ? `${s.target.x.toFixed(0)},${s.target.z.toFixed(0)}` : "none"}`,
+              `explored=${s.exploredChunks} stashes=${s.stashes} players=${s.players}`,
+              s.notes.length ? `notes: ${s.notes.join(" · ")}` : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          );
+        }
+        break;
+      }
       case "captcha": {
         const st = bot.getStatus();
         const links = st.lastKickLinks || [];
@@ -322,12 +480,12 @@ export function createDiscordControl(bot: FractalBot, options: DiscordControlOpt
     log.warn(`[discord] client error: ${msg}`);
   });
 
-  client.on("messageCreate", (msg: {
+  const onMessageCreate = (msg: {
     author?: { bot?: boolean };
     channelId?: string;
     content?: string;
     reply: (t: string) => Promise<unknown>;
-  }) => {
+  }): void => {
     if (msg.author?.bot || msg.channelId !== channelId) return;
     const content = String(msg.content ?? "").trim();
     if (!content.startsWith(prefix)) return;
@@ -342,13 +500,20 @@ export function createDiscordControl(bot: FractalBot, options: DiscordControlOpt
       log.warn(`[discord] command error: ${err.message}`);
       msg.reply(`error: ${err.message}`).catch(() => {});
     });
-  });
+  };
+  client.on("messageCreate", onMessageCreate as (...args: unknown[]) => void);
 
   // Primary bot kicks (fleet path also mirrors via mirrorEvent)
   bot.on("kicked", (info) => {
     const label =
-      bot.getStatus()?.username || bot.getStatus()?.label || defaultProfile;
+      bot.getStatus()?.username || defaultProfile;
     mirrorEvent(label, "kicked", [info]);
+  });
+
+  // Base-hunting notifications (stash found, elytra replaced, emergency, …).
+  bot.on("huntNotification", (notification) => {
+    const label = bot.getStatus()?.username || defaultProfile;
+    mirrorEvent(label, "huntNotification", [notification]);
   });
 
   return {

@@ -67,7 +67,7 @@ export function loadHomes(profileId: string, username?: string): string[] {
     }
     return [];
   } catch (err) {
-    log.warn("loadHomes failed", id, err instanceof Error ? err.message : err);
+    log.warn("loadHomes failed", { id, err: err instanceof Error ? err.message : err });
     return [];
   }
 }
@@ -95,7 +95,7 @@ export function saveHomes(profileId: string, homes: string[], username?: string)
     };
     fs.writeFileSync(file, JSON.stringify(doc, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
   } catch (err) {
-    log.warn("saveHomes failed", id, err instanceof Error ? err.message : err);
+    log.warn("saveHomes failed", { id, err: err instanceof Error ? err.message : err });
   }
   return cleaned;
 }
