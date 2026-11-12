@@ -16,13 +16,17 @@ export interface DiscordControlOptions {
   prefix?: string;
   /** Mirror bot logs into the channel */
   mirrorLogs?: boolean;
+  /** Fallback profile label when none is provided (primary bot). */
+  defaultProfile?: string;
 }
 
 export interface DiscordControl {
   start(): void;
   stop(): void;
   /** Queue a line for batched send to the control channel */
-  log(text: string): void;
+  log(text: string, profile?: string): void;
+  /** Mirror a structured fleet/bot event with profile tag */
+  mirrorEvent(profile: string, event: string, args?: unknown[]): void;
 }
 
 export function createDiscordControl(bot: FractalBot, options: DiscordControlOptions): DiscordControl {
@@ -85,12 +89,103 @@ export function createDiscordControl(bot: FractalBot, options: DiscordControlOpt
     }
   };
 
-  const queueLog = (text: string) => {
+  const defaultProfile =
+    String(options.defaultProfile || bot.getStatus()?.username || bot.getStatus()?.label || "bot").trim() ||
+    "bot";
+
+  const formatLine = (text: string, profile?: string) => {
+    const tag = String(profile || defaultProfile).trim() || defaultProfile;
+    const body = String(text ?? "").trim();
+    if (!body) return "";
+    // Avoid double-prefix if caller already tagged
+    if (/^\[[^\]]+\]\s/.test(body)) return body;
+    return `[${tag}] ${body}`;
+  };
+
+  const queueLog = (text: string, profile?: string) => {
     if (!options.mirrorLogs) return;
-    buffer.push(String(text));
+    const line = formatLine(text, profile);
+    if (!line) return;
+    buffer.push(line);
     if (!flushScheduled) {
       flushScheduled = true;
       setTimeout(flush, 4000);
+    }
+  };
+
+  const mirrorEvent = (profile: string, event: string, args?: unknown[]) => {
+    if (!options.mirrorLogs) return;
+    const a0 = args?.[0];
+    switch (event) {
+      case "phase":
+        queueLog(`phase → ${String(a0 ?? "")}`, profile);
+        break;
+      case "worldKind":
+        queueLog(`world → ${String(a0 ?? "")}`, profile);
+        break;
+      case "connected":
+        queueLog("connected", profile);
+        break;
+      case "disconnected":
+        queueLog(`disconnected${a0 ? `: ${String(a0).slice(0, 120)}` : ""}`, profile);
+        break;
+      case "authenticated":
+        queueLog("authenticated", profile);
+        break;
+      case "portalFound": {
+        const p = a0 as { position?: { x?: number; y?: number; z?: number }; distance?: number } | undefined;
+        const pos = p?.position;
+        queueLog(
+          pos
+            ? `portal found @ ${Number(pos.x).toFixed(0)},${Number(pos.y).toFixed(0)},${Number(pos.z).toFixed(0)} (${Number(p?.distance ?? 0).toFixed(1)}m)`
+            : "portal found",
+          profile,
+        );
+        break;
+      }
+      case "portalEntered": {
+        const p = a0 as { count?: number } | undefined;
+        queueLog(`portal entered (${p?.count ?? "?"})`, profile);
+        break;
+      }
+      case "chat": {
+        const c = a0 as { raw?: string } | string | undefined;
+        const raw = typeof c === "string" ? c : c?.raw;
+        if (raw) queueLog(`chat: ${String(raw).slice(0, 200)}`, profile);
+        break;
+      }
+      case "detection": {
+        const d = a0 as { kind?: string; username?: string; label?: string } | undefined;
+        if (d?.kind) {
+          queueLog(
+            `detect ${d.kind}${d.username || d.label ? `: ${d.username || d.label}` : ""}`,
+            profile,
+          );
+        }
+        break;
+      }
+      case "kicked": {
+        const info = a0 as { reason?: string; kind?: string; links?: string[] } | undefined;
+        const kind = info?.kind || "kick";
+        queueLog(`[${kind.toUpperCase()}] ${String(info?.reason || "").slice(0, 240)}`, profile);
+        for (const link of info?.links || []) queueLog(link, profile);
+        // Faster flush for kicks/captcha
+        if (!flushScheduled) {
+          flushScheduled = true;
+          setTimeout(flush, 500);
+        } else {
+          setTimeout(flush, 500);
+        }
+        break;
+      }
+      case "msaCode":
+        queueLog(`Microsoft device code: ${String(a0 ?? "")}`, profile);
+        break;
+      case "error":
+        queueLog(`error: ${String(a0 ?? "").slice(0, 200)}`, profile);
+        break;
+      default:
+        break;
     }
   };
 
@@ -249,22 +344,11 @@ export function createDiscordControl(bot: FractalBot, options: DiscordControlOpt
     });
   });
 
-  // Forward captcha kicks into Discord immediately
+  // Primary bot kicks (fleet path also mirrors via mirrorEvent)
   bot.on("kicked", (info) => {
-    const reason = info.reason;
-    const kind = info.kind;
-    const links = info.links || [];
-    if (kind === "captcha" || links.length) {
-      queueLog(`[CAPTCHA] ${reason}`);
-      for (const link of links) queueLog(link);
-      // Force faster flush for captcha
-      if (!flushScheduled) {
-        flushScheduled = true;
-        setTimeout(flush, 500);
-      } else {
-        setTimeout(flush, 500);
-      }
-    }
+    const label =
+      bot.getStatus()?.username || bot.getStatus()?.label || defaultProfile;
+    mirrorEvent(label, "kicked", [info]);
   });
 
   return {
@@ -286,5 +370,6 @@ export function createDiscordControl(bot: FractalBot, options: DiscordControlOpt
       }
     },
     log: queueLog,
+    mirrorEvent,
   };
 }

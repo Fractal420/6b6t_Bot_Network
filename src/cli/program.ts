@@ -339,21 +339,34 @@ async function runSession(
   const hardened = hardenControlConfig(config);
   const server = await startControlServer(fleet, hardened.controlHost, hardened.controlPort, hardened.controlToken);
 
-  let discord: { start: () => void; stop: () => void; log: (t: string) => void } | null = null;
+  let discord: { start: () => void; stop: () => void; log: (t: string, profile?: string) => void; mirrorEvent: (profile: string, event: string, args?: unknown[]) => void } | null = null;
   if (config.discordEnabled) {
     if (!config.discordToken || !config.discordChannelId) {
       log.warn("DISCORD_ENABLED=1 but DISCORD_TOKEN or DISCORD_CHANNEL_ID is missing — Discord control skipped");
     } else {
       try {
         const { createDiscordControl } = await import("../discord/control.ts");
-        // Discord binds to primary bot when available; fleet commands use web/RPC
+        // Discord commands bind to primary bot; fleet events mirror with profile tags
         const primary = fleet.resolveBot(null) || new (await import("../api/FractalBot.ts")).FractalBot(config);
+        const primaryLabel =
+          primary.getStatus()?.username ||
+          fleet.getFleetStatus().bots[0]?.username ||
+          config.username ||
+          "bot";
         discord = createDiscordControl(primary, {
           token: config.discordToken,
           channelId: config.discordChannelId,
           mirrorLogs: config.discordMirrorLogs,
+          defaultProfile: primaryLabel,
         });
         discord.start();
+        // Every fleet bot event → Discord line prefixed with [username]
+        fleet.on("botEvent", (payload: { id: string; event: string; args: unknown[] }) => {
+          if (!config.discordMirrorLogs || !discord) return;
+          const row = fleet.getFleetStatus().bots.find((b) => b.id === payload.id);
+          const profile = row?.username || row?.label || payload.id;
+          discord.mirrorEvent(profile, payload.event, payload.args);
+        });
         log.info("Discord remote control starting…");
       } catch (err) {
         log.error("Discord control failed to start", err instanceof Error ? err.message : err);
