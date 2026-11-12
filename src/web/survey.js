@@ -642,6 +642,14 @@ void main() {
   let others = [];
   // Default follow so gamepad forward always matches what you see on screen
   let mode = "follow";
+  /** "third" = over-the-shoulder follow; "first" = from the bot's eyes */
+  let person = "third";
+  try {
+    const saved = localStorage.getItem("fractal-survey-person");
+    if (saved === "first" || saved === "third") person = saved;
+  } catch {
+    /* ignore */
+  }
   let orbitAngle = 0.7;
   let radius = 20;
   /** Camera in *local* space (relative to origin). */
@@ -842,7 +850,11 @@ void main() {
   function getLook() {
     const yaw = predYaw != null ? predYaw : bot?.yaw ?? 0;
     const pitch = predPitch != null ? predPitch : bot?.pitch ?? 0;
-    return { yaw, pitch, mode };
+    return { yaw, pitch, mode, person };
+  }
+
+  function getPerson() {
+    return person;
   }
 
   function setPlayers(list) {
@@ -897,6 +909,32 @@ void main() {
   function syncModeButtons() {
     document.getElementById("survey-follow")?.classList.toggle("on", mode === "follow");
     document.getElementById("survey-orbit")?.classList.toggle("on", mode === "orbit");
+    document.getElementById("survey-person-3rd")?.classList.toggle("on", person === "third");
+    document.getElementById("survey-person-1st")?.classList.toggle("on", person === "first");
+    const hint = document.getElementById("survey-hint");
+    if (hint && mode === "follow") {
+      hint.textContent =
+        person === "first"
+          ? "1st person · drag stage to look · gamepad below"
+          : "3rd person · drag stage to look · gamepad below";
+    }
+  }
+
+  function setPerson(next) {
+    if (next !== "first" && next !== "third") return;
+    person = next;
+    try {
+      localStorage.setItem("fractal-survey-person", person);
+    } catch {
+      /* ignore */
+    }
+    // Person view only applies in follow — jump back so the camera snaps correctly
+    if (mode !== "follow") {
+      mode = "follow";
+      exitFly();
+    }
+    syncModeButtons();
+    scheduleDraw();
   }
 
   let lastOwns = false;
@@ -949,7 +987,8 @@ void main() {
 
   function entityRows() {
     const rows = [];
-    if (bot) {
+    // Hide the local bot body in first-person so the camera isn't inside the capsule
+    if (bot && !(mode === "follow" && person === "first")) {
       rows.push([
         lx(bot.x),
         ly(bot.y) + 0.9,
@@ -1023,7 +1062,57 @@ void main() {
     pitch = Math.max(-1.45, Math.min(1.45, pitch - dy * 0.0024));
   }
 
-  canvas.addEventListener("click", () => {
+  /** Follow-mode drag look: turn bot + local camera prediction. */
+  let followDragging = false;
+  let followDragMoved = false;
+  let followDragPointerId = null;
+  let followDragLastX = 0;
+  let followDragLastY = 0;
+  const FOLLOW_DRAG_THRESHOLD = 4;
+  // Radians per pixel — similar feel to gamepad look steps
+  const FOLLOW_LOOK_SENS = 0.0045;
+
+  function emitFollowLook(dxPx, dyPx) {
+    if (!dxPx && !dyPx) return;
+    let dyaw = dxPx * FOLLOW_LOOK_SENS;
+    let dpitch = dyPx * FOLLOW_LOOK_SENS;
+    // Match gamepad: invert horizontal yaw in 1st person
+    if (person === "first") dyaw = -dyaw;
+    nudgeLook(dyaw, dpitch);
+    window.dispatchEvent(
+      new CustomEvent("survey-turn", {
+        detail: { yaw: dyaw, pitch: dpitch },
+      }),
+    );
+    scheduleDraw();
+  }
+
+  function endFollowDrag(event) {
+    if (!followDragging) return;
+    if (followDragPointerId != null && event?.pointerId != null && event.pointerId !== followDragPointerId) {
+      return;
+    }
+    followDragging = false;
+    followDragPointerId = null;
+    canvas.classList.remove("look-dragging");
+    try {
+      if (event?.pointerId != null) canvas.releasePointerCapture?.(event.pointerId);
+    } catch {
+      /* ignore */
+    }
+    // Clear prediction shortly after drag ends so server pose can settle
+    setTimeout(() => {
+      if (!followDragging) clearLookPrediction();
+    }, 120);
+  }
+
+  canvas.addEventListener("click", (event) => {
+    // Ignore click after a drag-look gesture
+    if (followDragMoved) {
+      followDragMoved = false;
+      event.preventDefault?.();
+      return;
+    }
     if (mode === "follow") {
       canvas.focus();
       if (picked) {
@@ -1050,6 +1139,81 @@ void main() {
     if (!picked) return;
     canvas.dispatchEvent(new CustomEvent("survey-goto", { bubbles: true, detail: picked }));
   });
+
+  // Pointer drag: orbit/free camera OR follow-mode look
+  canvas.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 && event.pointerType === "mouse") return;
+    if (document.pointerLockElement === canvas) return;
+
+    if (mode === "follow") {
+      followDragging = true;
+      followDragMoved = false;
+      followDragPointerId = event.pointerId;
+      followDragLastX = event.clientX;
+      followDragLastY = event.clientY;
+      canvas.classList.add("look-dragging");
+      try {
+        canvas.setPointerCapture?.(event.pointerId);
+      } catch {
+        /* ignore */
+      }
+      canvas.focus?.();
+      return;
+    }
+
+    dragging = true;
+    try {
+      canvas.setPointerCapture?.(event.pointerId);
+    } catch {
+      /* ignore */
+    }
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (document.pointerLockElement === canvas) {
+      applyLook(event.movementX, event.movementY);
+      return;
+    }
+
+    if (followDragging && mode === "follow") {
+      const dx = event.clientX - followDragLastX;
+      const dy = event.clientY - followDragLastY;
+      followDragLastX = event.clientX;
+      followDragLastY = event.clientY;
+      if (Math.abs(dx) + Math.abs(dy) >= 1) {
+        if (Math.hypot(dx, dy) >= FOLLOW_DRAG_THRESHOLD || followDragMoved) {
+          followDragMoved = true;
+          emitFollowLook(dx, dy);
+        }
+      }
+      return;
+    }
+
+    if (dragging && mode !== "follow") {
+      applyLook(event.movementX || 0, event.movementY || 0);
+      // Fallback when movementX is 0 (some mobile browsers)
+      if (!event.movementX && !event.movementY && event.clientX != null) {
+        /* orbit still uses applyLook on free camera yaw/pitch */
+      }
+      if (mode === "orbit") {
+        mode = "free";
+        syncModeButtons();
+      }
+    }
+  });
+
+  canvas.addEventListener("pointerup", endFollowDrag);
+  canvas.addEventListener("pointercancel", endFollowDrag);
+  canvas.addEventListener("lostpointercapture", () => {
+    if (followDragging) {
+      followDragging = false;
+      followDragPointerId = null;
+      canvas.classList.remove("look-dragging");
+    }
+    dragging = false;
+  });
+
+  // Legacy mouse path for free/orbit when pointer events partially unsupported
   canvas.addEventListener("mousedown", (event) => {
     if (event.button === 0 && mode !== "follow" && document.pointerLockElement !== canvas) dragging = true;
   });
@@ -1058,7 +1222,7 @@ void main() {
   });
   window.addEventListener("mousemove", (event) => {
     if (document.pointerLockElement === canvas) applyLook(event.movementX, event.movementY);
-    else if (dragging && mode !== "follow") {
+    else if (dragging && mode !== "follow" && !followDragging) {
       applyLook(event.movementX, event.movementY);
       if (mode === "orbit") {
         mode = "free";
@@ -1120,12 +1284,22 @@ void main() {
   document.getElementById("survey-follow")?.addEventListener("click", () => {
     mode = "follow";
     exitFly();
+    syncModeButtons();
     canvas.focus();
   });
   document.getElementById("survey-orbit")?.addEventListener("click", () => {
     mode = "orbit";
     exitFly();
+    syncModeButtons();
     if (document.activeElement === canvas) canvas.blur();
+  });
+  document.getElementById("survey-person-3rd")?.addEventListener("click", () => {
+    setPerson("third");
+    canvas.focus();
+  });
+  document.getElementById("survey-person-1st")?.addEventListener("click", () => {
+    setPerson("first");
+    canvas.focus();
   });
   document.querySelectorAll(".rad").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1182,35 +1356,46 @@ void main() {
       // Mineflayer / prismarine yaw: 0 = north (-Z), π/2 = west (-X).
       // Forward unit vector must match setControlState("forward"):
       //   fx = -sin(yaw), fz = -cos(yaw)
-      // (Previously fz = +cos(yaw) which pointed the camera south when the bot
-      // faced north — so Move ▲ walked opposite to the view.)
       const fx = -Math.sin(useYaw);
       const fz = -Math.cos(useYaw);
-      // Over-the-shoulder: camera behind bot, looking the same way the bot looks
-      // so look-up / look-down actually tilts the view
-      const dist = 8;
-      const baseHeight = 3.6;
-      // Raise camera a bit when looking down, lower when looking up (keeps subject framed)
-      const pitchLift = usePitch * 2.2;
-      const targetEye = [
-        bx - fx * dist,
-        by + baseHeight + pitchLift,
-        bz - fz * dist,
-      ];
-      const k = Math.min(1, dt * 14);
-      eye[0] += (targetEye[0] - eye[0]) * k;
-      eye[1] += (targetEye[1] - eye[1]) * k;
-      eye[2] += (targetEye[2] - eye[2]) * k;
-
-      // Aim a point in front of the bot along its look direction
-      const lookAhead = 14;
       const cp = Math.cos(usePitch);
       const sp = Math.sin(usePitch);
-      // forward horizontal * cos(pitch), vertical = -sin(pitch) in MC coords
-      const tx = bx + fx * lookAhead * cp;
-      const ty = by + 1.4 - sp * lookAhead;
-      const tz = bz + fz * lookAhead * cp;
-      lookToward(tx, ty, tz);
+
+      if (person === "first") {
+        // First person: eyes of the bot (~1.62 blocks up)
+        const eyeH = 1.62;
+        const targetEye = [bx, by + eyeH, bz];
+        const k = Math.min(1, dt * 22);
+        eye[0] += (targetEye[0] - eye[0]) * k;
+        eye[1] += (targetEye[1] - eye[1]) * k;
+        eye[2] += (targetEye[2] - eye[2]) * k;
+        // Look along the bot's facing direction
+        const lookAhead = 12;
+        const tx = bx + fx * lookAhead * cp;
+        const ty = by + eyeH - sp * lookAhead;
+        const tz = bz + fz * lookAhead * cp;
+        lookToward(tx, ty, tz);
+      } else {
+        // Third person: over-the-shoulder behind the bot
+        const dist = 8;
+        const baseHeight = 3.6;
+        const pitchLift = usePitch * 2.2;
+        const targetEye = [
+          bx - fx * dist,
+          by + baseHeight + pitchLift,
+          bz - fz * dist,
+        ];
+        const k = Math.min(1, dt * 14);
+        eye[0] += (targetEye[0] - eye[0]) * k;
+        eye[1] += (targetEye[1] - eye[1]) * k;
+        eye[2] += (targetEye[2] - eye[2]) * k;
+
+        const lookAhead = 14;
+        const tx = bx + fx * lookAhead * cp;
+        const ty = by + 1.4 - sp * lookAhead;
+        const tz = bz + fz * lookAhead * cp;
+        lookToward(tx, ty, tz);
+      }
     }
   }
 
@@ -1244,7 +1429,9 @@ void main() {
       hudEl.textContent = picked
         ? `${picked.name}  ${picked.x} ${picked.y} ${picked.z}`
         : mode === "follow"
-          ? "follow · WASD steers the bot"
+          ? person === "first"
+            ? "1st person · WASD steers the bot"
+            : "3rd person · WASD steers the bot"
           : flying
             ? "survey flight"
             : "click stage to fly · WASD is camera";
@@ -1355,6 +1542,7 @@ void main() {
     clearLookPrediction,
     ensureFollow,
     getLook,
+    getPerson,
     get enabled() {
       return enabled;
     },
@@ -1363,6 +1551,9 @@ void main() {
     },
     get mode() {
       return mode;
+    },
+    get person() {
+      return person;
     },
     resize,
   };

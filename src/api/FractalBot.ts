@@ -2386,7 +2386,12 @@ export class FractalBot extends EventEmitter {
 
     if (op === "swap") {
       if (slot == null || command.to == null) throw new Error("swap needs slot and to");
-      if (slot !== command.to) await bot.moveSlotItem(slot, command.to);
+      if (slot === command.to) return this.getInventory();
+      const fromItem = bot.inventory.slots[slot] ?? null;
+      const toItem = bot.inventory.slots[command.to] ?? null;
+      assertItemFitsSlot(fromItem?.name, command.to);
+      assertItemFitsSlot(toItem?.name, slot);
+      await bot.moveSlotItem(slot, command.to);
       return this.getInventory();
     }
 
@@ -2426,6 +2431,16 @@ export class FractalBot extends EventEmitter {
 
     if (op === "equip") {
       const dest = command.dest ?? guessDest(item.name);
+      if (dest === "head" || dest === "torso" || dest === "legs" || dest === "feet") {
+        const targetSlot = slotForDest(dest);
+        if (targetSlot != null) assertItemFitsSlot(item.name, targetSlot);
+      }
+      // Refuse putting armor-only pieces into off-hand via equip
+      if (dest === "off-hand" && isArmorOnlyItem(item.name)) {
+        throw new Error(
+          `${cleanItemName(item.name)} belongs in the ${guessDest(item.name)} slot, not off-hand`,
+        );
+      }
       await bot.equip(item, dest);
       return this.getInventory();
     }
@@ -2745,12 +2760,85 @@ function destForSlot(slot?: number): EquipmentDest | null {
   return null;
 }
 
+function slotForDest(dest: EquipmentDest): number | null {
+  if (dest === "head") return 5;
+  if (dest === "torso") return 6;
+  if (dest === "legs") return 7;
+  if (dest === "feet") return 8;
+  if (dest === "off-hand") return 45;
+  return null;
+}
+
+/** Normalize registry names (strip minecraft: prefix). */
+function cleanItemName(name?: string | null): string {
+  return String(name || "")
+    .trim()
+    .replace(/^minecraft:/i, "")
+    .toLowerCase();
+}
+
+/**
+ * True if this item may only occupy a specific armor equipment slot
+ * (helmet / chestplate|elytra / leggings / boots). Used to block putting
+ * armor into the wrong slot or treating it as a generic off-hand item.
+ */
+function isArmorOnlyItem(name?: string | null): boolean {
+  const n = cleanItemName(name);
+  if (!n) return false;
+  return (
+    /(_helmet|turtle_helmet)$/.test(n) ||
+    n === "carved_pumpkin" ||
+    /(_head|_skull)$/.test(n) ||
+    /(_chestplate|elytra)$/.test(n) ||
+    /_leggings$/.test(n) ||
+    /_boots$/.test(n)
+  );
+}
+
+/**
+ * Which player-inventory equipment slot an item belongs in, or null if it
+ * is not restricted armor (main inventory / hotbar / off-hand OK).
+ */
+function equipmentSlotForItem(name?: string | null): number | null {
+  const n = cleanItemName(name);
+  if (!n) return null;
+  if (/(_helmet|turtle_helmet)$/.test(n) || n === "carved_pumpkin" || /(_head|_skull)$/.test(n)) return 5;
+  if (/(_chestplate|elytra)$/.test(n)) return 6;
+  if (/_leggings$/.test(n)) return 7;
+  if (/_boots$/.test(n)) return 8;
+  return null;
+}
+
+/**
+ * Enforce vanilla-style equipment rules:
+ * - armor slots 5–8 only accept the matching armor / head / elytra
+ * - everything else (including off-hand 45) is unrestricted here
+ */
+function assertItemFitsSlot(name: string | undefined | null, slot: number): void {
+  if (slot !== 5 && slot !== 6 && slot !== 7 && slot !== 8) return;
+  if (!name) return;
+  const expected = equipmentSlotForItem(name);
+  if (expected === slot) return;
+  const labels: Record<number, string> = {
+    5: "helmet / head",
+    6: "chestplate / elytra",
+    7: "leggings",
+    8: "boots",
+  };
+  const want = labels[slot] || `slot ${slot}`;
+  if (expected == null) {
+    throw new Error(`${cleanItemName(name) || "that item"} cannot go in the ${want} slot`);
+  }
+  throw new Error(`${cleanItemName(name)} belongs in the ${labels[expected]} slot, not ${want}`);
+}
+
 function guessDest(name: string): EquipmentDest {
-  if (/(_helmet|turtle_helmet|carved_pumpkin|_head|_skull)$/.test(name)) return "head";
-  if (/(_chestplate|elytra)$/.test(name)) return "torso";
-  if (/_leggings$/.test(name)) return "legs";
-  if (/_boots$/.test(name)) return "feet";
-  if (name === "shield" || name === "totem_of_undying") return "off-hand";
+  const n = cleanItemName(name);
+  if (/(_helmet|turtle_helmet)$/.test(n) || n === "carved_pumpkin" || /(_head|_skull)$/.test(n)) return "head";
+  if (/(_chestplate|elytra)$/.test(n)) return "torso";
+  if (/_leggings$/.test(n)) return "legs";
+  if (/_boots$/.test(n)) return "feet";
+  if (n === "shield" || n === "totem_of_undying") return "off-hand";
   return "hand";
 }
 

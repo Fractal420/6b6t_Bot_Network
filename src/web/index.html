@@ -307,15 +307,30 @@
           </div>
           <div class="collapse-body">
             <div class="mc-inv" id="inv">
-              <div class="mc-inv-equip">
-                <div class="mc-armor" id="inv-gear" title="Armor"></div>
-                <div class="mc-figure">
-                  <img id="inv-skin" class="mc-skin" alt="Player skin" width="64" height="128" decoding="async" />
-                  <p class="mc-figure-label" id="inv-skin-name">skin</p>
+              <!-- Top: armor | expanded skin | crafting + offhand below -->
+              <div class="mc-inv-top">
+                <div class="mc-armor" id="inv-gear" title="Armor (helmet → boots)"></div>
+                <div class="mc-player-block">
+                  <div class="mc-figure">
+                    <img id="inv-skin" class="mc-skin" alt="Player skin" width="64" height="128" decoding="async" />
+                  </div>
                 </div>
-                <div class="mc-offhand-col">
-                  <div class="mc-offhand" id="inv-offhand" title="Offhand"></div>
-                  <span class="mc-slot-label">off</span>
+                <div class="mc-craft-col">
+                  <div class="mc-craft" aria-hidden="true" title="Crafting (visual only)">
+                    <span class="mc-craft-label">Crafting</span>
+                    <div class="mc-craft-grid">
+                      <span class="inv-cell empty craft-ph"></span>
+                      <span class="inv-cell empty craft-ph"></span>
+                      <span class="inv-cell empty craft-ph"></span>
+                      <span class="inv-cell empty craft-ph"></span>
+                    </div>
+                    <span class="mc-craft-arrow">→</span>
+                    <span class="inv-cell empty craft-ph craft-result"></span>
+                  </div>
+                  <div class="mc-offhand-row" title="Offhand">
+                    <div class="mc-offhand" id="inv-offhand"></div>
+                    <span class="mc-slot-label">off</span>
+                  </div>
                 </div>
               </div>
               <div class="mc-inv-storage">
@@ -325,15 +340,20 @@
                 <div class="inv-hot" id="inv-hot"></div>
               </div>
             </div>
-            <p class="inv-name" id="inv-name">click a slot · click another to swap</p>
-            <div class="inv-acts">
-              <button type="button" data-inv="hold">hold</button>
-              <button type="button" data-inv="drop">drop</button>
-              <button type="button" data-inv="dropStack">toss</button>
-              <button type="button" data-inv="equip">equip</button>
-              <button type="button" data-inv="offhand">offhand</button>
-              <button type="button" data-inv="use">use</button>
+            <p class="inv-name" id="inv-name">tap a slot · tap another to move</p>
+            <div class="inv-acts" role="toolbar" aria-label="Inventory actions">
+              <button type="button" data-inv="hold" title="Hold in main hand">hold</button>
+              <button type="button" data-inv="drop" title="Drop 1">drop</button>
+              <button type="button" data-inv="dropStack" title="Toss whole stack">toss</button>
+              <button type="button" data-inv="equip" title="Equip to matching armor">equip</button>
+              <button type="button" data-inv="offhand" title="Move to off-hand">offhand</button>
+              <button type="button" data-inv="use" title="Use / consume">use</button>
+              <button type="button" data-inv="unequip" title="Unequip armor / off-hand">unequip</button>
             </div>
+            <p class="inv-hint" id="inv-hint">
+              Tap to select, tap another slot to move. Long-press to equip or hold.
+              Use the buttons on the selected slot. Armor only accepts the matching piece.
+            </p>
           </div>
         </div>
 
@@ -763,7 +783,7 @@
       <div class="survey-head">
         <div class="survey-head-top">
           <div>
-            <p class="hint" id="survey-hint">follow mode · gamepad below · orbit: drag stage</p>
+            <p class="hint" id="survey-hint">follow · drag stage to look · gamepad below</p>
           </div>
           <p class="survey-meta" id="survey-meta">no terrain yet</p>
         </div>
@@ -779,6 +799,9 @@
           <span class="survey-tools-sep" aria-hidden="true"></span>
           <button type="button" id="survey-follow" class="on">follow</button>
           <button type="button" id="survey-orbit">orbit</button>
+          <span class="survey-tools-sep" aria-hidden="true"></span>
+          <button type="button" id="survey-person-3rd" class="view3d-btn on" title="Third-person camera (behind the bot)">3rd</button>
+          <button type="button" id="survey-person-1st" class="view3d-btn" title="First-person camera (from the bot’s eyes)">1st</button>
         </div>
       </div>
       <div class="survey-stage">

@@ -1546,7 +1546,9 @@ function renderPlayers(players) {
 
 let selectedSlot = null;
 let packView = { quickBarSlot: 0, held: null, slots: [] };
-const SLOT_LABELS = { 5: "head", 6: "chest", 7: "legs", 8: "feet", 45: "offhand" };
+const SLOT_LABELS = { 5: "helmet", 6: "chestplate", 7: "leggings", 8: "boots", 45: "offhand" };
+const ARMOR_SLOT_KIND = { 5: "head", 6: "chest", 7: "legs", 8: "feet", 45: "offhand" };
+const ARMOR_SLOTS = new Set([5, 6, 7, 8]);
 
 function asInvView(data) {
   if (Array.isArray(data)) return { quickBarSlot: 0, held: null, slots: data };
@@ -1557,6 +1559,56 @@ function slotMap(slots) {
   const map = new Map();
   for (const item of slots || []) map.set(item.slot, item);
   return map;
+}
+
+function cleanItemName(name) {
+  return String(name || "")
+    .trim()
+    .replace(/^minecraft:/i, "")
+    .toLowerCase();
+}
+
+/** Matching armor slot for an item, or null if unrestricted. */
+function equipmentSlotForItem(name) {
+  const n = cleanItemName(name);
+  if (!n) return null;
+  if (/(_helmet|turtle_helmet)$/.test(n) || n === "carved_pumpkin" || /(_head|_skull)$/.test(n)) return 5;
+  if (/(_chestplate|elytra)$/.test(n)) return 6;
+  if (/_leggings$/.test(n)) return 7;
+  if (/_boots$/.test(n)) return 8;
+  return null;
+}
+
+function isArmorOnlyItem(name) {
+  return equipmentSlotForItem(name) != null;
+}
+
+/**
+ * Vanilla-style rule: armor slots 5–8 only accept the matching piece.
+ * Off-hand and main inventory accept anything (armor pieces included).
+ */
+function itemFitsSlot(name, slot) {
+  if (!ARMOR_SLOTS.has(slot)) return true;
+  if (!name) return true;
+  return equipmentSlotForItem(name) === slot;
+}
+
+function canSwapSlots(fromSlot, toSlot, bySlot) {
+  const fromItem = bySlot.get(fromSlot);
+  const toItem = bySlot.get(toSlot);
+  if (fromItem && !itemFitsSlot(fromItem.name, toSlot)) {
+    return {
+      ok: false,
+      reason: `${itemLabel(fromItem) || cleanItemName(fromItem.name)} cannot go in the ${SLOT_LABELS[toSlot] || `slot ${toSlot}`} slot`,
+    };
+  }
+  if (toItem && !itemFitsSlot(toItem.name, fromSlot)) {
+    return {
+      ok: false,
+      reason: `${itemLabel(toItem) || cleanItemName(toItem.name)} cannot go in the ${SLOT_LABELS[fromSlot] || `slot ${fromSlot}`} slot`,
+    };
+  }
+  return { ok: true };
 }
 
 function itemLabel(item) {
@@ -1808,6 +1860,24 @@ function playerAvatarEl(username, skinUrl, size = 22) {
   return img;
 }
 
+/**
+ * High-contrast SVG silhouettes (data URIs) so empty armor slots always show
+ * a clear helmet / chest / legs / boots / shield outline — no CDN dependency.
+ */
+const ARMOR_PLACEHOLDER_SVG = {
+  head: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges"><path fill="#9a9a9a" d="M4 3h8v1h1v4h-1v1H4V8H3V4h1V3zm1 2v3h6V5H5z"/><path fill="#6e6e6e" d="M5 5h6v1H5zm0 2h6v1H5z"/></svg>`,
+  chest: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges"><path fill="#9a9a9a" d="M3 2h3v1h4V2h3v1h1v3h-1v7H4V6H3V3h1V2zm1 2v1h1v7h6V5h1V4h-2v1H6V4H4z"/><path fill="#6e6e6e" d="M6 5h4v1H6zm0 2h4v1H6z"/></svg>`,
+  legs: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges"><path fill="#9a9a9a" d="M4 2h8v1h1v5h-1v6H9v-6H7v6H4V8H3V3h1V2zm1 2v4h2V4H5zm4 0v4h2V4H9z"/><path fill="#6e6e6e" d="M5 4h2v1H5zm4 0h2v1H9z"/></svg>`,
+  feet: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges"><path fill="#9a9a9a" d="M3 7h4v1h1v5H3V8h0V7zm5 0h4v1h1v5H9V8h0V7zm0 2H4v3h3V9zm5 0H9v3h3V9z"/><path fill="#6e6e6e" d="M4 9h3v1H4zm5 0h3v1H9z"/></svg>`,
+  offhand: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" shape-rendering="crispEdges"><path fill="#9a9a9a" d="M7 1h2v1h3v1h1v3h1v4h-1v3h-1v1H8v1H7v-1H4v-1H3v-3H2V6h1V3h1V2h3V1zm1 2H5v1H4v3H3v3h1v2h2v1h3v-1h2v-2h1V7h-1V4h-1V3H8z"/><path fill="#6e6e6e" d="M7 4h2v1H7zm-1 2h4v1H6z"/></svg>`,
+};
+
+function armorPlaceholderUrl(kind) {
+  const svg = ARMOR_PLACEHOLDER_SVG[kind];
+  if (!svg) return "";
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+}
+
 function fillCells(root, slots, bySlot, heldSlot) {
   if (!root) return;
   if (!root.childElementCount) {
@@ -1816,7 +1886,21 @@ function fillCells(root, slots, bySlot, heldSlot) {
       btn.type = "button";
       btn.className = "inv-cell empty";
       btn.dataset.slot = String(slot);
-      btn.innerHTML = `<img class="icon" alt="" draggable="false" hidden /><span class="tag"></span><span class="qty"></span><span class="wear" hidden><i></i></span>`;
+      const kind = ARMOR_SLOT_KIND[slot];
+      if (kind) {
+        btn.classList.add("armor-slot");
+        btn.dataset.armor = kind;
+      }
+      btn.innerHTML = `<img class="icon" alt="" draggable="false" hidden /><img class="armor-ph" alt="" draggable="false" /><span class="tag"></span><span class="qty"></span><span class="wear" hidden><i></i></span>`;
+      const ph = btn.querySelector("img.armor-ph");
+      if (ph && kind) {
+        ph.src = armorPlaceholderUrl(kind);
+        ph.alt = SLOT_LABELS[slot] || kind;
+        ph.removeAttribute("hidden");
+        ph.hidden = false;
+      } else if (ph) {
+        ph.hidden = true;
+      }
       root.append(btn);
     }
   }
@@ -1827,6 +1911,8 @@ function fillCells(root, slots, bySlot, heldSlot) {
     const qty = btn.querySelector(".qty");
     const wear = btn.querySelector(".wear");
     let icon = btn.querySelector("img.icon");
+    let ph = btn.querySelector("img.armor-ph");
+    const kind = ARMOR_SLOT_KIND[slot];
     if (!icon) {
       icon = document.createElement("img");
       icon.className = "icon";
@@ -1835,23 +1921,48 @@ function fillCells(root, slots, bySlot, heldSlot) {
       icon.hidden = true;
       btn.prepend(icon);
     }
+    if (kind) {
+      btn.classList.add("armor-slot");
+      btn.dataset.armor = kind;
+      if (!ph) {
+        ph = document.createElement("img");
+        ph.className = "armor-ph";
+        ph.alt = SLOT_LABELS[slot] || kind;
+        ph.draggable = false;
+        ph.src = armorPlaceholderUrl(kind);
+        icon.after(ph);
+      } else if (!ph.getAttribute("src") || !String(ph.getAttribute("src")).startsWith("data:")) {
+        // Upgrade any old CDN-based placeholders to embedded SVGs
+        ph.src = armorPlaceholderUrl(kind);
+      }
+    }
     btn.classList.toggle("empty", !item);
     btn.classList.toggle("held", slot === heldSlot);
     btn.classList.toggle("on", slot === selectedSlot);
+    btn.classList.remove("invalid-target");
     const label = itemLabel(item);
+    const emptyLabel = SLOT_LABELS[slot] ? `empty ${SLOT_LABELS[slot]}` : `empty ${slot}`;
     btn.title = item
-      ? `${label} ×${item.count}`
-      : SLOT_LABELS[slot] || `empty ${slot}`;
-    // Keep neutral MC slot chrome; tint only as soft fallback under icon
+      ? `${label} ×${item.count}${item.maxDurability != null ? ` · durability ${Math.max(0, (item.maxDurability - (item.durabilityUsed || 0)))}/${item.maxDurability}` : ""}`
+      : emptyLabel;
     btn.style.background = "";
-    if (item) setItemIcon(icon, item.name || label);
-    else {
+    if (item) {
+      setItemIcon(icon, item.name || label);
+      if (ph) {
+        ph.hidden = true;
+        ph.setAttribute("hidden", "");
+      }
+    } else {
       icon.hidden = true;
       icon.removeAttribute("src");
       icon.dataset.iconId = "";
       btn.classList.remove("no-icon");
+      if (ph && kind) {
+        ph.src = armorPlaceholderUrl(kind);
+        ph.removeAttribute("hidden");
+        ph.hidden = false;
+      }
     }
-    // Short name always set — CSS hides it once the texture loads
     tag.textContent = item ? shortTag(item.name || label) : "";
     qty.textContent = item && item.count > 1 ? String(item.count) : "";
     if (item?.maxDurability) {
@@ -1861,6 +1972,17 @@ function fillCells(root, slots, bySlot, heldSlot) {
       wear.querySelector("i").style.background = left < 0.25 ? "var(--blood)" : "var(--moss)";
     } else {
       wear.hidden = true;
+    }
+  }
+  // Highlight illegal targets while an item is selected (armor rules)
+  if (selectedSlot != null) {
+    const selected = bySlot.get(selectedSlot);
+    if (selected) {
+      for (const btn of root.querySelectorAll(".inv-cell")) {
+        const slot = Number(btn.dataset.slot);
+        if (slot === selectedSlot) continue;
+        if (!itemFitsSlot(selected.name, slot)) btn.classList.add("invalid-target");
+      }
     }
   }
 }
@@ -2012,9 +2134,22 @@ function renderInventory(data) {
   const selected = selectedSlot == null ? null : bySlot.get(selectedSlot);
   const nameEl = document.getElementById("inv-name");
   if (nameEl) {
-    if (selectedSlot == null) nameEl.textContent = "click a slot · click another to swap";
-    else if (selected) nameEl.textContent = `${itemLabel(selected)}  slot ${selectedSlot}  ×${selected.count}`;
-    else nameEl.textContent = `empty slot ${selectedSlot} · click another to move here`;
+    const touch = isTouchInventoryUi();
+    if (selectedSlot == null) {
+      nameEl.textContent = touch
+        ? "tap a slot · tap another to move · long-press = equip/hold"
+        : "click a slot · click another to move · shift = toss · right-click = drop 1";
+    } else if (selected) {
+      const fit = equipmentSlotForItem(selected.name);
+      const extra = fit != null ? ` · armor → ${SLOT_LABELS[fit]}` : "";
+      nameEl.textContent = `${itemLabel(selected)} ×${selected.count}  (slot ${selectedSlot})${extra}`;
+    } else {
+      const kind = SLOT_LABELS[selectedSlot];
+      const verb = touch ? "tap" : "click";
+      nameEl.textContent = kind
+        ? `empty ${kind} · ${verb} an item to move here`
+        : `empty slot ${selectedSlot} · ${verb} an item to move here`;
+    }
   }
   renderOpenWindow(packView.window);
   updateInventorySkin();
@@ -2554,13 +2689,23 @@ window.__fractalControlsActive = false;
           /* ignore */
         }
         const tick = () => {
-          // Instant local camera response (yaw + pitch)
+          // In 1st person, left/right feel inverted vs 3rd-person over-the-shoulder —
+          // flip yaw so ◀ / ▶ match what you see on screen.
+          let turnYaw = yaw;
           try {
-            window.fractalSurvey?.nudgeLook?.(yaw, pitch);
+            if (window.fractalSurvey?.getPerson?.() === "first" || window.fractalSurvey?.person === "first") {
+              turnYaw = -yaw;
+            }
           } catch {
             /* ignore */
           }
-          void rpc("turn", { yaw, pitch });
+          // Instant local camera response (yaw + pitch)
+          try {
+            window.fractalSurvey?.nudgeLook?.(turnYaw, pitch);
+          } catch {
+            /* ignore */
+          }
+          void rpc("turn", { yaw: turnYaw, pitch });
           // If the user is already holding a move key, re-sync facing so
           // strafe/forward stay aligned with the new look direction.
           if (keys.forward || keys.back || keys.left || keys.right) {
@@ -2738,49 +2883,365 @@ window.addEventListener("keyup", (event) => {
   void sendControl();
 });
 
-document.getElementById("inv")?.addEventListener("click", async (event) => {
-  const btn = event.target.closest(".inv-cell");
-  if (!btn) return;
-  const slot = Number(btn.dataset.slot);
+/** True on phones / tablets (coarse pointer or touch points). */
+function isTouchInventoryUi() {
+  try {
+    if (window.matchMedia?.("(pointer: coarse)").matches) return true;
+    if (navigator.maxTouchPoints > 0) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+function updateInvHintForDevice() {
+  const el = document.getElementById("inv-hint");
+  if (!el) return;
+  if (isTouchInventoryUi()) {
+    el.textContent =
+      "Tap to select, tap another slot to move. Long-press to equip or hold. Use the buttons on the selected slot. Armor only accepts the matching piece.";
+  } else {
+    el.textContent =
+      "Click to select, click another to move. Shift = toss · right-click = drop 1 · double-click = hold/equip. Armor only accepts the matching piece. Keys 1–9 select hotbar.";
+  }
+}
+updateInvHintForDevice();
+
+async function invActivateSlot(slot, { shift = false, alt = false, secondary = false } = {}) {
   if (!Number.isFinite(slot)) return;
-  if (event.shiftKey) {
+  const by = slotMap(packView.slots);
+  const item = by.get(slot);
+
+  // Shift / secondary long-press on desktop modifiers — only on occupied slots
+  if (shift) {
+    if (!item) {
+      push("err", "slot is empty");
+      return;
+    }
     selectedSlot = slot;
+    if (isArmorOnlyItem(item.name) && !ARMOR_SLOTS.has(slot)) {
+      await invOp("equip", { slot });
+      return;
+    }
     await invOp("dropStack", { slot });
     return;
   }
-  if (event.altKey) {
+  if (alt) {
+    if (!item) {
+      push("err", "slot is empty");
+      return;
+    }
     selectedSlot = slot;
     await invOp("drop", { slot, count: 1 });
     return;
   }
-  if (event.detail >= 2) {
+  // Secondary (long-press / right-click): equip armor or hold, else drop 1
+  if (secondary) {
+    if (!item) {
+      // Empty hotbar long-press → switch held hand to that slot
+      if (slot >= 36 && slot <= 44) {
+        selectedSlot = slot;
+        renderInventory(packView);
+        await invOp("hold", { slot });
+        return;
+      }
+      selectedSlot = null;
+      renderInventory(packView);
+      return;
+    }
     selectedSlot = slot;
-    await invOp("hold", { slot });
+    if (isArmorOnlyItem(item.name) && !ARMOR_SLOTS.has(slot)) {
+      await invOp("equip", { slot });
+      return;
+    }
+    if (!ARMOR_SLOTS.has(slot) && slot !== 45) {
+      await invOp("hold", { slot });
+      return;
+    }
+    await invOp("drop", { slot, count: 1 });
     return;
   }
+
+  // Move / swap when a source is already selected
   if (selectedSlot != null && selectedSlot !== slot) {
-    const by = slotMap(packView.slots);
-    if (!by.get(selectedSlot) && !by.get(slot)) {
-      selectedSlot = slot;
+    const fromItem = by.get(selectedSlot);
+    // Source went empty (or was empty) — drop selection, don't move
+    if (!fromItem) {
+      selectedSlot = null;
+      renderInventory(packView);
+      return;
+    }
+    const check = canSwapSlots(selectedSlot, slot, by);
+    if (!check.ok) {
+      push("err", check.reason || "cannot move that item there");
       renderInventory(packView);
       return;
     }
     const from = selectedSlot;
-    selectedSlot = slot;
+    selectedSlot = null;
     await invOp("swap", { slot: from, to: slot });
     return;
   }
-  selectedSlot = selectedSlot === slot ? null : slot;
+
+  // Toggle selection
+  if (selectedSlot === slot) {
+    selectedSlot = null;
+    renderInventory(packView);
+    return;
+  }
+
+  // Empty slots: only hotbar (36–44) may be selected so you can switch the held hand
+  if (!item) {
+    const isHotbar = slot >= 36 && slot <= 44;
+    if (!isHotbar) {
+      selectedSlot = null;
+      renderInventory(packView);
+      return;
+    }
+    selectedSlot = slot;
+    renderInventory(packView);
+    // Switch active quick-bar slot even when empty
+    await invOp("hold", { slot });
+    return;
+  }
+
+  selectedSlot = slot;
   renderInventory(packView);
-});
+}
+
+async function invDoubleActivate(slot) {
+  const by = slotMap(packView.slots);
+  const item = by.get(slot);
+  if (!item) {
+    if (slot >= 36 && slot <= 44) {
+      selectedSlot = slot;
+      renderInventory(packView);
+      await invOp("hold", { slot });
+      return;
+    }
+    selectedSlot = null;
+    renderInventory(packView);
+    return;
+  }
+  selectedSlot = slot;
+  if (isArmorOnlyItem(item.name) && !ARMOR_SLOTS.has(slot)) {
+    await invOp("equip", { slot });
+  } else {
+    await invOp("hold", { slot });
+  }
+}
+
+// —— Pointer-based inventory (works on mobile + desktop) ——
+(function setupInvPointers() {
+  const root = document.getElementById("inv");
+  if (!root) return;
+
+  const LONG_MS = 480;
+  const DOUBLE_MS = 320;
+  let pressTimer = null;
+  let pressBtn = null;
+  let pressSlot = null;
+  let longFired = false;
+  let lastTapSlot = null;
+  let lastTapAt = 0;
+  let suppressClickUntil = 0;
+
+  function clearPress() {
+    if (pressTimer) {
+      clearTimeout(pressTimer);
+      pressTimer = null;
+    }
+    if (pressBtn) pressBtn.classList.remove("pressing");
+    pressBtn = null;
+    pressSlot = null;
+  }
+
+  root.addEventListener(
+    "pointerdown",
+    (event) => {
+      const btn = event.target.closest(".inv-cell");
+      if (!btn || !root.contains(btn)) return;
+      // Only primary button / touch
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      const slot = Number(btn.dataset.slot);
+      if (!Number.isFinite(slot)) return;
+
+      longFired = false;
+      pressBtn = btn;
+      pressSlot = slot;
+      btn.classList.add("pressing");
+      try {
+        btn.setPointerCapture?.(event.pointerId);
+      } catch {
+        /* ignore */
+      }
+
+      pressTimer = setTimeout(() => {
+        pressTimer = null;
+        longFired = true;
+        if (pressBtn) pressBtn.classList.remove("pressing");
+        // Haptic feedback when available
+        try {
+          navigator.vibrate?.(12);
+        } catch {
+          /* ignore */
+        }
+        void invActivateSlot(slot, { secondary: true });
+      }, LONG_MS);
+    },
+    { passive: true },
+  );
+
+  function endPress(event) {
+    const slot = pressSlot;
+    const wasLong = longFired;
+    const btn = pressBtn;
+    clearPress();
+    if (btn) {
+      try {
+        btn.releasePointerCapture?.(event.pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
+    if (slot == null) return;
+    if (wasLong) {
+      // Long-press already handled; swallow the following click
+      suppressClickUntil = Date.now() + 400;
+      lastTapSlot = null;
+      return;
+    }
+    // Short tap — double-tap detect
+    const now = Date.now();
+    if (lastTapSlot === slot && now - lastTapAt < DOUBLE_MS) {
+      lastTapSlot = null;
+      lastTapAt = 0;
+      suppressClickUntil = now + 400;
+      void invDoubleActivate(slot);
+      return;
+    }
+    lastTapSlot = slot;
+    lastTapAt = now;
+    void invActivateSlot(slot, {
+      shift: !!(event.shiftKey),
+      alt: !!(event.altKey),
+    });
+  }
+
+  root.addEventListener("pointerup", endPress);
+  root.addEventListener("pointercancel", () => {
+    clearPress();
+    longFired = false;
+  });
+  root.addEventListener("pointerleave", (event) => {
+    // Only clear if the pointer left the pressed cell
+    if (pressBtn && event.target === pressBtn) clearPress();
+  });
+
+  // Prevent native context menu on slots (mobile long-press / desktop right-click)
+  root.addEventListener("contextmenu", (event) => {
+    const btn = event.target.closest(".inv-cell");
+    if (!btn) return;
+    event.preventDefault();
+    // Desktop right-click still drops one when not already handled by long-press path
+    if (event.pointerType === "mouse" || (!isTouchInventoryUi() && event.button === 2)) {
+      const slot = Number(btn.dataset.slot);
+      if (!Number.isFinite(slot)) return;
+      void invActivateSlot(slot, { secondary: true });
+    }
+  });
+
+  // Block synthetic click after long-press / double-tap
+  root.addEventListener(
+    "click",
+    (event) => {
+      if (Date.now() < suppressClickUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    },
+    true,
+  );
+})();
 
 document.querySelectorAll("[data-inv]").forEach((btn) => {
+  // Reliable press highlight on iOS/Android (CSS :active alone is flaky)
+  const setPress = (on) => btn.classList.toggle("pressing", on);
+  btn.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      setPress(true);
+      try {
+        btn.setPointerCapture?.(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    },
+    { passive: true },
+  );
+  const clearPress = (e) => {
+    setPress(false);
+    try {
+      btn.releasePointerCapture?.(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+  btn.addEventListener("pointerup", clearPress);
+  btn.addEventListener("pointercancel", clearPress);
+  btn.addEventListener("pointerleave", () => setPress(false));
+  btn.addEventListener("lostpointercapture", () => setPress(false));
+
   btn.addEventListener("click", async () => {
+    setPress(false);
     const slot = selectedOrThrow();
     if (slot == null) return;
     const op = btn.getAttribute("data-inv");
-    if (op === "offhand") await invOp("equip", { slot, dest: "off-hand" });
-    else await invOp(op, { slot });
+    const by = slotMap(packView.slots);
+    const item = by.get(slot);
+
+    // Empty slots: only "hold" on hotbar is allowed (switch active hand)
+    if (!item) {
+      if (op === "hold" && slot >= 36 && slot <= 44) {
+        await invOp("hold", { slot });
+        return;
+      }
+      push("err", "slot is empty");
+      if (!(slot >= 36 && slot <= 44)) selectedSlot = null;
+      renderInventory(packView);
+      return;
+    }
+
+    if (op === "offhand") {
+      if (isArmorOnlyItem(item.name)) {
+        push("err", `${itemLabel(item) || item.name} belongs in armor, not off-hand`);
+        return;
+      }
+      await invOp("equip", { slot, dest: "off-hand" });
+      return;
+    }
+
+    if (op === "equip") {
+      const dest = equipmentSlotForItem(item.name);
+      if (dest == null && !["shield", "totem_of_undying"].includes(cleanItemName(item.name))) {
+        await invOp("hold", { slot });
+        return;
+      }
+      await invOp("equip", { slot });
+      return;
+    }
+
+    if (op === "unequip") {
+      if (!ARMOR_SLOTS.has(slot) && slot !== 45) {
+        push("err", "select an armor or off-hand slot to unequip");
+        return;
+      }
+      await invOp("unequip", { slot });
+      return;
+    }
+
+    await invOp(op, { slot });
   });
 });
 
@@ -3272,6 +3733,18 @@ if (notificationPermission() === "granted" && notifyPrefEnabled()) {
 }
 
 window.addEventListener("survey-radius", () => void refreshVoxels());
+
+// Drag-to-look on the 3D stage (follow · 1st / 3rd person)
+window.addEventListener("survey-turn", (event) => {
+  const yaw = Number(event.detail?.yaw) || 0;
+  const pitch = Number(event.detail?.pitch) || 0;
+  if (!yaw && !pitch) return;
+  void rpc("turn", { yaw, pitch });
+  if (keys.forward || keys.back || keys.left || keys.right) {
+    void syncBotLookToView();
+  }
+});
+
 window.addEventListener("survey-goto", async (event) => {
   const { x, y, z } = event.detail || {};
   if (![x, y, z].every(Number.isFinite)) return;
