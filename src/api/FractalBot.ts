@@ -81,6 +81,8 @@ export class FractalBot extends EventEmitter {
   private worldKind: WorldKind = "unknown";
   private authenticated = false;
   private serverPortalsEntered = 0;
+  /** Chat/brand confirmed we reached the playable main backend. */
+  private mainConfirmed = false;
   private autoReconnect = true;
   private autoLobby = true;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -1578,6 +1580,7 @@ export class FractalBot extends EventEmitter {
     this.authenticated = false;
     this.reachedLogin = false;
     this.serverPortalsEntered = 0;
+    this.mainConfirmed = false;
     this.worldKind = "unknown";
     this.startedAt = Date.now();
     this.playerSkinUrls.clear();
@@ -1670,14 +1673,14 @@ export class FractalBot extends EventEmitter {
           /* ignore */
         }
         if (this.autoLobby) this.navigator?.start();
-      }, 800);
+      }, 400);
       // Chunks may load a bit later in sky / second lobby
       setTimeout(() => {
         if (generation !== this.joinGeneration) return;
         if (this.autoLobby && this.authenticated && !isMainWorld(this.worldKind)) {
           this.navigator?.start();
         }
-      }, 3500);
+      }, 1800);
     };
 
     // Offline/cracked: wait for server /login|/register success via chat.
@@ -1763,6 +1766,29 @@ export class FractalBot extends EventEmitter {
     bot.on("messagestr", (message: string) => {
       if (generation !== this.joinGeneration) return;
       this.ingestHomesFromChat(String(message || ""));
+    });
+
+    // 6b6t join flow signals from packet log:
+    // - "already trying to connect" → stop portal spam, wait for Velocity hop
+    // - "You're now playing on" → force in_game / stop hunt
+    bot.on("messagestr", (message: string) => {
+      if (generation !== this.joinGeneration) return;
+      const text = String(message || "");
+      if (/already trying to connect/i.test(text)) {
+        log.info("Server transfer in progress — holding portal approach");
+        this.navigator?.holdForTransfer?.(10_000);
+        return;
+      }
+      if (/you'?re now playing on/i.test(text) || /now playing on/i.test(text)) {
+        log.info(`Main join confirmed by chat: ${text.slice(0, 80)}`);
+        this.mainConfirmed = true;
+        this.serverPortalsEntered = Math.max(
+          this.serverPortalsEntered,
+          this.config.requiredServerPortals,
+        );
+        this.navigator?.stop();
+        this.refreshWorld("chat-playing-on");
+      }
     });
 
     bot.on("windowOpen", (window) => {
@@ -1908,6 +1934,56 @@ export class FractalBot extends EventEmitter {
       this.refreshWorld("forcedMove");
     });
 
+    // Server brand switches Paper → Fox when Velocity lands us on the main backend
+    try {
+      const client = bot._client as {
+        on?: (ev: string, fn: (...args: unknown[]) => void) => void;
+      };
+      client.on?.("custom_payload", (data: unknown) => {
+        if (generation !== this.joinGeneration) return;
+        const d = data as { channel?: string; data?: unknown } | null;
+        const channel = String(d?.channel || "");
+        if (!/brand/i.test(channel)) return;
+        let brand = "";
+        const raw = d?.data;
+        if (typeof raw === "string") brand = raw;
+        else if (Buffer.isBuffer(raw)) {
+          // first byte often length prefix in MC brand payloads
+          try {
+            brand = raw.toString("utf8").replace(/^[\x00-\x1f]+/, "");
+          } catch {
+            brand = "";
+          }
+        } else if (raw && typeof raw === "object" && "toString" in (raw as object)) {
+          brand = String(raw);
+        }
+        brand = brand.replace(/\0/g, "").trim();
+        if (!brand) return;
+        try {
+          (bot as { brand?: string }).brand = brand;
+        } catch {
+          /* ignore */
+        }
+        if (/^fox\b/i.test(brand) && this.authenticated) {
+          if (!this.mainConfirmed) {
+            log.info(`Main backend brand: ${brand}`);
+            this.mainConfirmed = true;
+            this.serverPortalsEntered = Math.max(
+              this.serverPortalsEntered,
+              this.config.requiredServerPortals,
+            );
+          }
+          this.navigator?.stop();
+          this.refreshWorld("brand-fox");
+        } else if (/^paper\b/i.test(brand)) {
+          this.refreshWorld("brand-paper");
+        }
+      });
+    } catch {
+      /* ignore */
+    }
+
+
     bot.on("kicked", (reason, loggedIn) => {
       if (generation !== this.joinGeneration) return;
       const parsed = parseKick(reason, this.config.username);
@@ -2046,6 +2122,7 @@ export class FractalBot extends EventEmitter {
       authenticated: this.authenticated,
       serverPortalsEntered: this.serverPortalsEntered,
       requiredServerPortals: this.config.requiredServerPortals,
+      mainConfirmed: this.mainConfirmed,
     });
     const kindChanged = kind !== this.worldKind;
     if (kindChanged) {
@@ -2065,11 +2142,17 @@ export class FractalBot extends EventEmitter {
       }
     }
 
+    // Brand/chat main: treat portals as done so we stop lobby hunting
+    if (isMainWorld(kind) && this.mainConfirmed && this.serverPortalsEntered < this.config.requiredServerPortals) {
+      this.serverPortalsEntered = this.config.requiredServerPortals;
+      log.info("Main world confirmed — marking portals complete");
+    }
+
     // Do not treat intermediate lobbies as main until required portals are done
     if (
       isMainWorld(kind) &&
       this.authenticated &&
-      this.serverPortalsEntered >= this.config.requiredServerPortals
+      (this.serverPortalsEntered >= this.config.requiredServerPortals || this.mainConfirmed)
     ) {
       this.navigator?.stop();
       this.setPhase("in_game");

@@ -17,6 +17,8 @@ export interface PortalNavigator {
   start(): void;
   stop(): void;
   huntOnce(): Promise<boolean>;
+  /** Pause approach — server is already transferring (don't spam portal). */
+  holdForTransfer(ms?: number): void;
   get hunting(): boolean;
 }
 
@@ -64,6 +66,7 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
   let hunting = false;
   let stopped = false;
   let loopGen = 0;
+  let transferHoldUntil = 0;
 
   const stopMovement = () => {
     try {
@@ -85,6 +88,7 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
     const gm = String(bot.game?.gameMode ?? "").toLowerCase();
     if (gm === "survival" || gm === "0") return true;
     if (dim !== startDim) return true;
+    // Relative jump only — lobby/main absolute coords can change
     if (here.distanceTo(startPos) > 20) return true;
     return false;
   };
@@ -249,14 +253,13 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
       await sleep(80);
     }
 
-    const deadline = Date.now() + (isLargePortal ? 22_000 : 14_000);
+    const deadline = Date.now() + (isLargePortal ? 16_000 : 10_000);
     const approachStarted = Date.now();
     let lastMoveCheck = Date.now();
     let lastMovePos = startPos.clone();
     let stuckBoosts = 0;
     let chargeUntil = 0;
     let lastAimAt = 0;
-
     while (Date.now() < deadline && !stopped) {
       if (!bot.entity) break;
       const here = bot.entity.position;
@@ -265,6 +268,18 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
         stopMovement();
         hooks.onEntered(portal);
         return true;
+      }
+
+      // Server said transfer is in progress — stop spamming the portal
+      // ("You are already trying to connect to a server!")
+      if (Date.now() < transferHoldUntil) {
+        stopMovement();
+        await sleep(120);
+        if (hasTransferred(startPos, startDim)) {
+          hooks.onEntered(portal);
+          return true;
+        }
+        continue;
       }
 
       const dist = Math.hypot(here.x - target.x, here.z - target.z);
@@ -397,14 +412,19 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
         // before hunting the next portal. A short pause let overlapping hunts
         // all count the same transfer (1/2 → 7/2) and skip the second portal.
         stopMovement();
-        await sleep(2500);
+        // Fast path: second lobby often lands within ~1s; poll for main coords
+        // Wait briefly for Velocity reconfigure before next portal hunt
+        const waitUntil = Date.now() + 1800;
+        while (hunting && !stopped && gen === loopGen && Date.now() < waitUntil) {
+          await sleep(100);
+        }
         continue;
       }
-      const waitMs = Math.min(Math.max(retryMs, 1500), 3000);
+      const waitMs = Math.min(Math.max(retryMs, 900), 2000);
       log.info(`Portal retry in ${Math.round(waitMs / 1000)}s`);
       const until = Date.now() + waitMs;
       while (hunting && !stopped && gen === loopGen && Date.now() < until) {
-        await sleep(150);
+        await sleep(120);
       }
     }
     if (gen === loopGen) stopMovement();
@@ -425,7 +445,13 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
       hunting = false;
       stopped = true;
       loopGen += 1;
+      transferHoldUntil = 0;
       stopMovement();
+    },
+    holdForTransfer(ms = 8000) {
+      transferHoldUntil = Date.now() + ms;
+      stopMovement();
+      log.info(`Portal approach holding for transfer (${ms}ms)`);
     },
     huntOnce,
     get hunting() {
