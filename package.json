@@ -1,6 +1,6 @@
 {
   "name": "fractalbot",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Fractal 6b Slave Bot — Mineflayer control for 6b6t with captcha alerts, dual-portal lobby, and Elytra terrain mapping (Xaero regions)",
   "type": "module",
   "bin": {
