@@ -203,11 +203,59 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
     // of the opening instead of the upper frame / crying_obsidian lip.
     const lookYOffset = isLargePortal ? 0.4 : 1.0;
 
+    /** Snap yaw/pitch toward a world point (no gradual look spam). */
+    const aimAt = async (x: number, y: number, z: number) => {
+      if (!bot.entity) return;
+      const eye = bot.entity.position.offset(0, bot.entity.height || 1.62, 0);
+      const dx = x - eye.x;
+      const dy = y - eye.y;
+      const dz = z - eye.z;
+      const yaw = Math.atan2(-dx, -dz);
+      const ground = Math.hypot(dx, dz) || 1e-6;
+      const pitch = Math.atan2(-dy, ground);
+      try {
+        await bot.look(yaw, pitch, true);
+      } catch {
+        /* ignore */
+      }
+    };
+
+    const yawError = (x: number, z: number): number => {
+      if (!bot.entity) return 0;
+      const dx = x - bot.entity.position.x;
+      const dz = z - bot.entity.position.z;
+      const want = Math.atan2(-dx, -dz);
+      let err = want - bot.entity.yaw;
+      while (err > Math.PI) err -= Math.PI * 2;
+      while (err < -Math.PI) err += Math.PI * 2;
+      return Math.abs(err);
+    };
+
+    // Offline / Velocity: physics can still be off right after login — force on
+    try {
+      if (bot.physicsEnabled === false) {
+        bot.physicsEnabled = true;
+        log.info("Enabled physics before portal approach");
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // One clean aim before sprinting — prevents the "half turn then wander" path
+    {
+      const below0 = startPos.y < target.y - 0.3;
+      const lookY0 = below0 ? Math.max(startPos.y + 1.6, target.y + 0.5) : startPos.y + lookYOffset;
+      await aimAt(past.x, lookY0, past.z);
+      await sleep(80);
+    }
+
     const deadline = Date.now() + (isLargePortal ? 22_000 : 14_000);
+    const approachStarted = Date.now();
     let lastMoveCheck = Date.now();
     let lastMovePos = startPos.clone();
     let stuckBoosts = 0;
     let chargeUntil = 0;
+    let lastAimAt = 0;
 
     while (Date.now() < deadline && !stopped) {
       if (!bot.entity) break;
@@ -228,8 +276,18 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
       const lookY = belowPortal
         ? Math.max(here.y + 1.6, target.y + 0.5)
         : here.y + lookYOffset;
-      void bot.lookAt(new Vec3(past.x, lookY, past.z), true).catch(() => {});
 
+      // Re-aim only when heading drifts (spam lookAt caused mid-path half turns)
+      const now = Date.now();
+      if (now - lastAimAt > 180 && (yawError(past.x, past.z) > 0.12 || belowPortal)) {
+        lastAimAt = now;
+        await aimAt(past.x, lookY, past.z);
+      }
+
+      // Keep strafe/back off unless stuck recovery needs them
+      bot.setControlState("left", false);
+      bot.setControlState("right", false);
+      bot.setControlState("back", false);
       bot.setControlState("forward", true);
       bot.setControlState("sprint", true);
 
@@ -250,11 +308,12 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
         bot.setControlState("jump", false);
       }
 
-      // Stuck detector — very aggressive when we are under the portal lip
-      if (Date.now() - lastMoveCheck > 500) {
-        if (here.distanceTo(lastMovePos) < 0.5) {
+      // Stuck detector — grace period so offline bots finish the initial turn
+      // and get moving before we start backpedal/strafe recoveries.
+      const graceMs = 1600;
+      if (Date.now() - approachStarted > graceMs && Date.now() - lastMoveCheck > 550) {
+        if (here.distanceTo(lastMovePos) < 0.45) {
           stuckBoosts += 1;
-          // Physics can stay paused after Velocity reconfigure on some accounts
           try {
             if (bot.physicsEnabled === false) {
               bot.physicsEnabled = true;
@@ -263,48 +322,55 @@ export function createPortalNavigator(bot: Bot, retryMs: number, hooks: Navigato
           } catch {
             /* ignore */
           }
+          // Drop any pathfinder goal that might be fighting our sprint
+          try {
+            bot.pathfinder?.setGoal(null);
+          } catch {
+            /* ignore */
+          }
           log.info(
-            `Portal approach stuck (boost ${stuckBoosts}${isLargePortal ? ", large" : ""}${belowPortal ? ", low" : ""}) y=${here.y.toFixed(1)} physics=${bot.physicsEnabled !== false} → re-center + jump`,
+            `Portal approach stuck (boost ${stuckBoosts}${isLargePortal ? ", large" : ""}${belowPortal ? ", low" : ""}) y=${here.y.toFixed(1)} physics=${bot.physicsEnabled !== false} → re-aim + jump`,
           );
-          void bot.lookAt(new Vec3(past.x, lookY, past.z), true).catch(() => {});
 
-          // Back up a step so we get a clean run-up, then charge with jump
-          bot.setControlState("forward", false);
-          bot.setControlState("back", true);
-          bot.setControlState("jump", true);
-          await sleep(belowPortal ? 280 : 160);
-          bot.setControlState("back", false);
-          bot.setControlState("forward", true);
-
-          // Strafe to slide off the frame edge
-          bot.setControlState(stuckBoosts % 2 === 0 ? "left" : "right", true);
-          await sleep(isLargePortal ? 220 : 140);
+          // Hard re-aim toward the portal, then a short charge (no random half-turns)
+          await aimAt(past.x, lookY, past.z);
           bot.setControlState("left", false);
           bot.setControlState("right", false);
+          bot.setControlState("back", false);
+          bot.setControlState("forward", true);
+          bot.setControlState("sprint", true);
+          bot.setControlState("jump", true);
 
-          // Every few stuck cycles, try pathfinder toward the portal mouth
-          if (stuckBoosts % 4 === 0) {
-            try {
-              const { goals } = await import("../pathfinder.ts");
-              bot.pathfinder?.setGoal(
-                new goals.GoalNear(target.x, target.y, target.z, 0.8),
-                true,
-              );
-            } catch {
-              /* pathfinder optional */
-            }
+          // Only back up if we are very close and likely pressed against the frame
+          if (dist < 2.5 || belowPortal) {
+            bot.setControlState("forward", false);
+            bot.setControlState("back", true);
+            await sleep(belowPortal ? 220 : 140);
+            bot.setControlState("back", false);
+            bot.setControlState("forward", true);
+            await aimAt(past.x, lookY, past.z);
           }
 
-          // After recovery, force a long jump-sprint charge
+          // Light strafe only after several stuck cycles (frame edge)
+          if (stuckBoosts >= 3 && stuckBoosts % 2 === 1) {
+            bot.setControlState(stuckBoosts % 4 === 1 ? "left" : "right", true);
+            await sleep(isLargePortal ? 160 : 110);
+            bot.setControlState("left", false);
+            bot.setControlState("right", false);
+            await aimAt(past.x, lookY, past.z);
+          }
+
           chargeUntil = Date.now() + (belowPortal ? 1800 : 1200);
           bot.setControlState("jump", true);
           bot.setControlState("sprint", true);
+          bot.setControlState("forward", true);
+          lastAimAt = Date.now();
         }
         lastMoveCheck = Date.now();
         lastMovePos = here.clone();
       }
 
-      await sleep(30);
+      await sleep(40);
     }
 
     stopMovement();

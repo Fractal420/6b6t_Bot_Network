@@ -3,7 +3,7 @@
  * (and optionally what the bot sends back). Used to reverse-engineer features
  * like tab-complete and /homes GUIs on custom servers (e.g. 6b6t).
  *
- * Output: NDJSON lines in Settings/serverlistener.ndjson by default.
+ * Output: NDJSON lines in logs/packetlistener/<nickname>.ndjson by default.
  * Toggle via SERVER_LISTENER=1 in settings (no restart required once attached).
  */
 import fs from "node:fs";
@@ -373,10 +373,90 @@ export function serverListenerStatus(key?: string): { active: boolean; filePath:
   };
 }
 
+/**
+ * logs/packetlistener/<nickname>.ndjson
+ * `settingsFolder` is Settings/ — parent is the project root.
+ * Name uses the account nickname/username, never the profile UUID.
+ */
 export function defaultServerListenerPath(settingsFolder: string, username?: string): string {
   const base = String(username || "server")
     .trim()
+    // Strip UUID-looking tokens if someone passes a profile id by mistake
+    .replace(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      "server",
+    )
     .replace(/[^\w.\-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
     .slice(0, 64) || "server";
-  return path.join(settingsFolder, `serverlistener-${base}.ndjson`);
+  const root = path.resolve(settingsFolder, "..");
+  return path.join(root, "logs", "packetlistener", `${base}.ndjson`);
+}
+
+/**
+ * Truncate the packet log for a profile (or all active listeners if key omitted).
+ * Safe while the listener is still running — further packets keep appending.
+ */
+export async function clearServerListenerLog(
+  key?: string,
+  settingsFolder?: string,
+): Promise<{ cleared: string[]; linesBefore: number }> {
+  // Let pending appends finish so we don't race a partial write
+  try {
+    await writeQueue;
+  } catch {
+    /* ignore */
+  }
+
+  const cleared: string[] = [];
+  let linesBefore = 0;
+
+  const clearFile = (filePath: string, entry?: ListenerEntry) => {
+    if (!filePath) return;
+    const resolved = path.resolve(filePath);
+    try {
+      if (entry) linesBefore += entry.lines || 0;
+      else if (fs.existsSync(resolved)) {
+        const size = fs.statSync(resolved).size;
+        // rough pre-clear size note only
+        void size;
+      }
+      fs.mkdirSync(path.dirname(resolved), { recursive: true });
+      fs.writeFileSync(
+        resolved,
+        JSON.stringify({
+          t: new Date().toISOString(),
+          dir: "meta",
+          name: "listener_cleared",
+          key: key || entry?.username || undefined,
+        }) + "\n",
+        "utf8",
+      );
+      if (entry) entry.lines = 1;
+      cleared.push(resolved);
+      log.info(`Server packet listener log cleared → ${resolved}`);
+    } catch (err) {
+      log.warn("serverListener clear failed", resolved, err instanceof Error ? err.message : err);
+    }
+  };
+
+  if (key) {
+    const k = key.toLowerCase();
+    const entry = listeners.get(k);
+    if (entry?.filePath) {
+      clearFile(entry.filePath, entry);
+    } else if (settingsFolder) {
+      clearFile(defaultServerListenerPath(settingsFolder, key));
+    }
+  } else {
+    for (const entry of listeners.values()) {
+      clearFile(entry.filePath, entry);
+    }
+    // If nothing active, still try default generic path
+    if (cleared.length === 0 && settingsFolder) {
+      clearFile(defaultServerListenerPath(settingsFolder));
+    }
+  }
+
+  return { cleared, linesBefore };
 }

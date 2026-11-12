@@ -66,6 +66,13 @@ export interface FractalConfig {
   mapAutoStart: boolean;
   /** How often to re-scan loaded player entities (ms). Fixes missed leave events after teleports. */
   detectionRecheckMs: number;
+  /**
+   * After a player entity leaves render range, wait this long before emitting
+   * player_leave. If they reappear within the grace window (entity-id churn,
+   * walking in/out of view), suppress both leave and the subsequent enter.
+   * Default 60s — only mark left after a full minute away.
+   */
+  detectionPlayerLeaveGraceMs: number;
   detectionPlayers: boolean;
   detectionCrystals: boolean;
   detectionTnt: boolean;
@@ -77,12 +84,12 @@ export interface FractalConfig {
   discordMirrorLogs: boolean;
   /**
    * When true, every server→client protocol packet is appended to
-   * Settings/serverlistener.ndjson (for debugging tab-complete, GUIs, etc.).
+   * logs/packetlistener/<nickname>.ndjson (for debugging tab-complete, GUIs, etc.).
    */
   serverListener: boolean;
   /** Also log client→server packets when serverListener is on. */
   serverListenerOutbound: boolean;
-  /** Override path for the NDJSON dump (default: Settings/serverlistener.ndjson). */
+  /** Override path for the NDJSON dump (default: logs/packetlistener/<nickname>.ndjson). */
   serverListenerPath: string;
 }
 
@@ -121,6 +128,7 @@ export function loadConfig(overrides: Partial<FractalConfig> = {}): FractalConfi
     },
     mapAutoStart: envString("MAP_AUTO_START", "0") === "1",
     detectionRecheckMs: envNumber("DETECTION_RECHECK_MS", 3_000),
+    detectionPlayerLeaveGraceMs: envNumber("DETECTION_PLAYER_LEAVE_GRACE_MS", 60_000),
     detectionPlayers: envString("DETECTION_PLAYERS", "1") !== "0",
     detectionCrystals: envString("DETECTION_CRYSTALS", "1") !== "0",
     detectionTnt: envString("DETECTION_TNT", "1") !== "0",

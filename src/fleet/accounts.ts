@@ -69,6 +69,12 @@ export interface AccountProfile {
   portalRetryMs?: number;
   /** Re-scan loaded players every N ms (teleport / chunk unload misses entityGone). */
   detectionRecheckMs?: number;
+  /**
+   * Wait this long after a player leaves render range before emitting player_leave.
+   * Re-entry within the window suppresses leave + enter (no log / notify spam).
+   * Stored per profile in Settings/Profiles.
+   */
+  detectionPlayerLeaveGraceMs?: number;
   detectionPlayers?: boolean;
   detectionCrystals?: boolean;
   detectionTnt?: boolean;
@@ -236,7 +242,16 @@ function normalizeProfile(p: Partial<AccountProfile> | undefined): AccountProfil
     }
   }
   if (typeof p.mapAutoStart === "boolean") out.mapAutoStart = p.mapAutoStart;
-  for (const k of ["reconnectMs", "reconnectMaxMs", "rateLimitCooldownMs", "captchaCooldownMs", "requiredServerPortals", "portalRetryMs", "detectionRecheckMs"] as const) {
+  for (const k of [
+    "reconnectMs",
+    "reconnectMaxMs",
+    "rateLimitCooldownMs",
+    "captchaCooldownMs",
+    "requiredServerPortals",
+    "portalRetryMs",
+    "detectionRecheckMs",
+    "detectionPlayerLeaveGraceMs",
+  ] as const) {
     const v = p[k];
     if (typeof v === "number" && Number.isFinite(v) && v >= 0) out[k] = v;
   }

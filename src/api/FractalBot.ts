@@ -101,6 +101,22 @@ export class FractalBot extends EventEmitter {
   private detectionLog: DetectionEvent[] = [];
   /** Entity ids currently tracked as in-range players. */
   private nearbyPlayers = new Map<number, { username: string; enteredAt: number }>();
+  /**
+   * Username-keyed presence (lower → display name + enter time + live entity ids).
+   * Prevents spam when the same player gets a new entity id while still nearby.
+   */
+  private nearbyNames = new Map<
+    string,
+    { username: string; enteredAt: number; entityIds: Set<number> }
+  >();
+  /**
+   * Pending leave timers keyed by username(lower). Leave is deferred so brief
+   * out-of-range / entity-id churn does not fire leave+enter notifications.
+   */
+  private pendingPlayerLeaves = new Map<
+    string,
+    { timer: NodeJS.Timeout; username: string }
+  >();
   /** username(lower) → texture URL from tab-list / SkinRestorer properties */
   private playerSkinUrls = new Map<string, string>();
   /** Periodic sweep so teleports / missed entityGone still emit leave events. */
@@ -173,22 +189,25 @@ export class FractalBot extends EventEmitter {
     if (this.bot) {
       this.wireServerListener(this.bot);
     } else {
-      const key = (next.profileId || next.username || this.config.profileId || this.config.username || "").toLowerCase();
+      const key = (next.username || this.config.username || "").toLowerCase();
       if (key) detachServerListener(key);
     }
     this.emit("status", this.getStatus());
   }
 
   private wireServerListener(bot: Bot): void {
-    const profileKey = this.config.profileId || this.config.username || bot.username || "unknown";
+    // File name + listener key use nickname/username — never the profile UUID
+    const nick =
+      String(this.config.username || bot.username || "")
+        .trim() || "unknown";
     const filePath =
       this.config.serverListenerPath?.trim() ||
-      defaultServerListenerPath(settingsDir(), profileKey);
+      defaultServerListenerPath(settingsDir(), nick);
     attachServerListener(bot, {
       enabled: this.config.serverListener === true,
       outbound: this.config.serverListenerOutbound !== false,
       filePath,
-      key: profileKey,
+      key: nick,
     });
   }
 
@@ -436,6 +455,15 @@ export class FractalBot extends EventEmitter {
     for (const [key, value] of Object.entries(state) as [keyof ControlState, boolean][]) {
       if (typeof value === "boolean") bot.setControlState(key, value);
     }
+    // If every movement/stance flag is false, hard-clear so nothing keeps walking/turning
+    const anyOn = Object.values(state).some((v) => v === true);
+    if (!anyOn) {
+      try {
+        bot.clearControlStates();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   stopMovement(): void {
@@ -536,7 +564,8 @@ export class FractalBot extends EventEmitter {
     }
     return {
       events: this.detectionLog.slice(),
-      nearby: [...this.nearbyPlayers.values()].map((p) => ({
+      // Deduped by username so entity-id churn does not list the same player twice
+      nearby: [...this.nearbyNames.values()].map((p) => ({
         username: p.username,
         enteredAt: p.enteredAt,
         skinUrl: this.skinFor(p.username),
@@ -550,7 +579,7 @@ export class FractalBot extends EventEmitter {
    */
   clearDetectionLog(): void {
     this.detectionLog.length = 0;
-    this.nearbyPlayers.clear();
+    this.clearPlayerPresence(false);
     const bot = this.bot;
     if (bot) {
       try {
@@ -571,6 +600,145 @@ export class FractalBot extends EventEmitter {
     this.detectionLog.unshift(full);
     if (this.detectionLog.length > 200) this.detectionLog.length = 200;
     this.emit("detection", full);
+  }
+
+  /** Cancel all deferred leave timers. */
+  private clearPendingPlayerLeaves(): void {
+    for (const pending of this.pendingPlayerLeaves.values()) {
+      clearTimeout(pending.timer);
+    }
+    this.pendingPlayerLeaves.clear();
+  }
+
+  /**
+   * Drop all presence state. When emitLeaves is true, fire player_leave for each
+   * unique username still considered nearby (used on portal / dimension hops).
+   */
+  private clearPlayerPresence(emitLeaves: boolean, reason?: string): void {
+    this.clearPendingPlayerLeaves();
+    if (emitLeaves && this.nearbyNames.size) {
+      for (const entry of this.nearbyNames.values()) {
+        this.pushDetection({
+          kind: "player_leave",
+          label: entry.username,
+          username: entry.username,
+          skinUrl: this.skinFor(entry.username),
+          message: reason
+            ? `${entry.username} left range (${reason})`
+            : `${entry.username} left range`,
+        });
+      }
+    }
+    this.nearbyPlayers.clear();
+    this.nearbyNames.clear();
+  }
+
+  /**
+   * Mark a player entity as in range. Emits player_enter only the first time
+   * that username is seen; later entity-id changes are silent updates.
+   * Cancels a pending leave if the same name reappears within the grace window.
+   */
+  private trackPlayerEnter(
+    username: string,
+    entityId: number,
+    opts?: {
+      position?: { x: number; y: number; z: number };
+      distance?: number;
+    },
+  ): void {
+    if (this.config.detectionPlayers === false) return;
+    const key = username.toLowerCase();
+
+    // Cancel deferred leave — player is still / again nearby
+    const pending = this.pendingPlayerLeaves.get(key);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingPlayerLeaves.delete(key);
+    }
+
+    this.nearbyPlayers.set(entityId, { username, enteredAt: Date.now() });
+
+    const existing = this.nearbyNames.get(key);
+    if (existing) {
+      existing.entityIds.add(entityId);
+      if (existing.username !== username) existing.username = username;
+      return; // already nearby by name — no notification
+    }
+
+    const enteredAt = Date.now();
+    this.nearbyNames.set(key, {
+      username,
+      enteredAt,
+      entityIds: new Set([entityId]),
+    });
+    this.pushDetection({
+      kind: "player_enter",
+      label: username,
+      username,
+      skinUrl: this.skinFor(username),
+      message: `${username} entered range${opts?.distance != null ? ` (${opts.distance}m)` : ""}`,
+      position: opts?.position,
+      distance: opts?.distance,
+    });
+  }
+
+  /**
+   * Entity id left render range. Only schedules player_leave after the grace
+   * period, and only if no other entity for that username is still tracked.
+   */
+  private trackPlayerLeave(entityId: number): void {
+    if (this.config.detectionPlayers === false) return;
+    const prev = this.nearbyPlayers.get(entityId);
+    if (!prev) return;
+    this.nearbyPlayers.delete(entityId);
+
+    const key = prev.username.toLowerCase();
+    const nameEntry = this.nearbyNames.get(key);
+    if (nameEntry) {
+      nameEntry.entityIds.delete(entityId);
+      if (nameEntry.entityIds.size > 0) return; // still have another live entity
+    }
+
+    // Already waiting to leave
+    if (this.pendingPlayerLeaves.has(key)) return;
+
+    const username = nameEntry?.username ?? prev.username;
+    const grace = Math.max(0, this.config.detectionPlayerLeaveGraceMs ?? 60_000);
+
+    if (grace <= 0) {
+      this.nearbyNames.delete(key);
+      this.pushDetection({
+        kind: "player_leave",
+        label: username,
+        username,
+        skinUrl: this.skinFor(username),
+        message: `${username} left range`,
+      });
+      return;
+    }
+
+    // Keep username in nearbyNames during grace so the Nearby list does not flicker
+    // when someone stands next to the bot and entity ids churn. Leave event fires
+    // only after the grace window if they never reappeared.
+    const timer = setTimeout(() => {
+      this.pendingPlayerLeaves.delete(key);
+      const still = this.nearbyNames.get(key);
+      // Re-enter during grace re-added entity ids → still present, skip leave
+      if (still && still.entityIds.size > 0) return;
+      this.nearbyNames.delete(key);
+      for (const [id, info] of [...this.nearbyPlayers.entries()]) {
+        if (info.username.toLowerCase() === key) this.nearbyPlayers.delete(id);
+      }
+      this.pushDetection({
+        kind: "player_leave",
+        label: username,
+        username,
+        skinUrl: this.skinFor(username),
+        message: `${username} left range`,
+      });
+    }, grace);
+
+    this.pendingPlayerLeaves.set(key, { timer, username });
   }
 
   private clearDetectionRecheck(): void {
@@ -683,6 +851,7 @@ export class FractalBot extends EventEmitter {
   /**
    * Sweep tab-list players that still have a loaded entity (same source as Play → Nearby).
    * After teleports / dimension changes, entityGone is often missed — this emits leave/enter to stay in sync.
+   * Presence is username-keyed so entity-id churn while a player stands next to the bot does not spam.
    */
   private recheckNearbyPlayers(bot: Bot): void {
     // Default on — only skip when explicitly disabled
@@ -706,56 +875,24 @@ export class FractalBot extends EventEmitter {
       const id = live.id;
 
       seen.add(id);
-      if (this.nearbyPlayers.has(id)) {
-        const prev = this.nearbyPlayers.get(id)!;
-        if (prev.username !== rawName) prev.username = rawName;
-        continue;
-      }
-
       const pos = {
         x: Math.round(live.position.x),
         y: Math.round(live.position.y),
         z: Math.round(live.position.z),
       };
       const dist = origin ? Number(origin.distanceTo(live.position).toFixed(1)) : undefined;
-      this.nearbyPlayers.set(id, { username: rawName, enteredAt: Date.now() });
-      this.pushDetection({
-        kind: "player_enter",
-        label: rawName,
-        username: rawName,
-        skinUrl: this.skinFor(rawName),
-        message: `${rawName} entered range${dist != null ? ` (${dist}m)` : ""}`,
-        position: pos,
-        distance: dist,
-      });
+      this.trackPlayerEnter(rawName, id, { position: pos, distance: dist });
     }
 
-    for (const [id, prev] of [...this.nearbyPlayers.entries()]) {
+    for (const id of [...this.nearbyPlayers.keys()]) {
       if (seen.has(id)) continue;
-      this.nearbyPlayers.delete(id);
-      this.pushDetection({
-        kind: "player_leave",
-        label: prev.username,
-        username: prev.username,
-        skinUrl: this.skinFor(prev.username),
-        message: `${prev.username} left range`,
-      });
+      this.trackPlayerLeave(id);
     }
   }
 
   /** Force leave for everyone tracked (dimension / portal hop), then optional reseed. */
   private flushNearbyPlayers(reason: string): void {
-    if (!this.nearbyPlayers.size) return;
-    for (const [, prev] of [...this.nearbyPlayers.entries()]) {
-      this.pushDetection({
-        kind: "player_leave",
-        label: prev.username,
-        username: prev.username,
-        skinUrl: this.skinFor(prev.username),
-        message: `${prev.username} left range (${reason})`,
-      });
-    }
-    this.nearbyPlayers.clear();
+    this.clearPlayerPresence(true, reason);
   }
 
 
@@ -822,7 +959,7 @@ export class FractalBot extends EventEmitter {
   }
 
   private wireDetection(bot: Bot, generation: number): void {
-    this.nearbyPlayers.clear();
+    this.clearPlayerPresence(false);
     this.clearDetectionRecheck();
 
     const entityLabel = (entity: { name?: string; displayName?: unknown }): string => {
@@ -859,11 +996,8 @@ export class FractalBot extends EventEmitter {
     }) => {
       if (this.config.detectionPlayers === false) return;
       if (entity.id == null) return;
-      if (this.nearbyPlayers.has(entity.id)) return;
       const username = playerName(entity);
       if (!username) return; // skip NPCs / color-junk / non-tab players
-      const enteredAt = Date.now();
-      this.nearbyPlayers.set(entity.id, { username, enteredAt });
       const pos = entity.position
         ? {
             x: Math.round(entity.position.x),
@@ -875,30 +1009,12 @@ export class FractalBot extends EventEmitter {
         bot.entity?.position && entity.position
           ? Number(bot.entity.position.distanceTo(entity.position).toFixed(1))
           : undefined;
-      this.pushDetection({
-        kind: "player_enter",
-        label: username,
-        username,
-        skinUrl: this.skinFor(username),
-        message: `${username} entered range${dist != null ? ` (${dist}m)` : ""}`,
-        position: pos,
-        distance: dist,
-      });
+      this.trackPlayerEnter(username, entity.id, { position: pos, distance: dist });
     };
 
     const notePlayerLeave = (entityId: number, fallbackName?: string) => {
       if (this.config.detectionPlayers === false) return;
-      const prev = this.nearbyPlayers.get(entityId);
-      if (!prev) return; // never tracked → don't emit orphan leave
-      const username = prev.username;
-      this.nearbyPlayers.delete(entityId);
-      this.pushDetection({
-        kind: "player_leave",
-        label: username,
-        username,
-        skinUrl: this.skinFor(username),
-        message: `${username} left range`,
-      });
+      this.trackPlayerLeave(entityId);
       void fallbackName;
     };
 
@@ -1538,9 +1654,21 @@ export class FractalBot extends EventEmitter {
       log.info(`Authenticated (${reason})`);
       this.emit("authenticated");
       this.refreshWorld("authenticated");
+      // Offline accounts often still have physics paused after /login — enable
+      // before lobby portal walk so the first approach is not a half-turn stall.
+      try {
+        bot.physicsEnabled = true;
+      } catch {
+        /* ignore */
+      }
       setTimeout(() => {
         if (generation !== this.joinGeneration) return;
         this.refreshWorld("post-auth");
+        try {
+          bot.physicsEnabled = true;
+        } catch {
+          /* ignore */
+        }
         if (this.autoLobby) this.navigator?.start();
       }, 800);
       // Chunks may load a bit later in sky / second lobby
@@ -2098,11 +2226,11 @@ export class FractalBot extends EventEmitter {
   private async disconnectInternal(reason: string): Promise<void> {
     this.navigator?.stop();
     this.clearDetectionRecheck();
-    this.nearbyPlayers.clear();
+    this.clearPlayerPresence(false);
     this.auth?.destroy();
     this.auth = null;
     this.navigator = null;
-    detachServerListener((this.config.profileId || this.config.username || "").toLowerCase());
+    detachServerListener((this.config.username || "").toLowerCase());
     const bot = this.bot;
     this.bot = null;
     if (!bot) return;

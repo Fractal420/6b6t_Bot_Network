@@ -21,28 +21,72 @@
   <body>
     <div class="grain" aria-hidden="true"></div>
 
-    <header class="top">
-      <div class="top-controls">
-        <button type="button" id="nav-toggle" class="icon-btn" aria-label="Open modules" title="Modules">
-          <span aria-hidden="true">☰</span>
-        </button>
-        <div class="top-right">
-          <button type="button" id="nav-home" class="icon-btn" data-tab="play" aria-label="Home" title="Home">
-            <span aria-hidden="true">⌂</span>
+    <div class="top-sticky" id="top-sticky">
+        <div class="top-controls" id="top-bar">
+          <button type="button" id="nav-toggle" class="icon-btn" aria-label="Open modules" title="Modules">
+            <span aria-hidden="true">☰</span>
           </button>
-          <button type="button" id="nav-log" class="icon-btn" data-tab="log" aria-label="Activity log" title="Log">
-            <span aria-hidden="true">🪵</span>
-          </button>
-          <button type="button" id="nav-settings" class="icon-btn" data-tab="settings" aria-label="Settings" title="Settings">
-            <span aria-hidden="true">⚙</span>
-          </button>
-          <div class="phase-wrap">
-            <span class="phase pill" id="phase" data-tone="neutral">idle</span>
-            <span class="link" id="ws-state">socket cold</span>
+
+          <div class="profile-switcher" id="profile-switcher">
+            <button
+              type="button"
+              id="profile-selector-btn"
+              class="profile-selector-btn"
+              aria-haspopup="listbox"
+              aria-expanded="false"
+              aria-controls="profile-dropdown"
+            >
+              <span class="ps-status" id="ps-status-dot" data-tone="neutral"></span>
+              <span class="ps-info">
+                <span class="ps-label" id="ps-label">No profile</span>
+                <span class="ps-meta" id="ps-meta">Select a profile</span>
+              </span>
+              <span class="ps-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div id="profile-dropdown" class="profile-dropdown" role="listbox" hidden>
+              <div class="pd-head">
+                <span>Profiles</span>
+                <button type="button" class="pd-manage" id="pd-manage" title="Manage profiles">Manage</button>
+              </div>
+              <div id="pd-list" class="pd-list"></div>
+              <div class="pd-empty" id="pd-empty" hidden>No profiles yet — open Manage to add one</div>
+            </div>
+          </div>
+
+          <div class="top-right">
+            <button type="button" id="nav-home" class="icon-btn" data-tab="play" aria-label="Home" title="Home">
+              <span aria-hidden="true">⌂</span>
+            </button>
+            <button type="button" id="nav-log" class="icon-btn" data-tab="log" aria-label="Activity log" title="Log">
+              <span aria-hidden="true">🪵</span>
+            </button>
+            <button type="button" id="nav-settings" class="icon-btn" data-tab="settings" aria-label="Settings" title="Settings">
+              <span aria-hidden="true">⚙</span>
+            </button>
+            <div class="phase-wrap">
+              <span class="phase pill" id="phase" data-tone="neutral">idle</span>
+              <span class="link" id="ws-state">socket cold</span>
+            </div>
           </div>
         </div>
+
+        <section id="ops-strip" class="ops-strip" aria-live="polite">
+          <div class="ops-left">
+            <span id="ops-summary">no status yet</span>
+          </div>
+          <div class="ops-vitals" id="ops-vitals" hidden>
+            <span class="ov-item"><span class="ov-k">world</span> <span id="ops-world">—</span></span>
+            <span class="ov-item"><span class="ov-k">pos</span> <span id="ops-xyz">—</span></span>
+            <span class="ov-item"><span class="ov-k">hp</span> <span id="ops-hp">—</span></span>
+            <span class="ov-item"><span class="ov-k">food</span> <span id="ops-food">—</span></span>
+            <span class="ov-item"><span class="ov-k">ping</span> <span id="ops-ping">—</span></span>
+          </div>
+        </section>
       </div>
 
+    <div class="top-sticky-spacer" id="top-sticky-spacer" aria-hidden="true"></div>
+
+    <header class="top">
       <div class="brand-strip">
         <div class="brand">
           <img
@@ -52,32 +96,6 @@
             width="720"
             height="160"
           />
-        </div>
-      </div>
-
-      <div class="profile-switcher" id="profile-switcher">
-        <button
-          type="button"
-          id="profile-selector-btn"
-          class="profile-selector-btn"
-          aria-haspopup="listbox"
-          aria-expanded="false"
-          aria-controls="profile-dropdown"
-        >
-          <span class="ps-status" id="ps-status-dot" data-tone="neutral"></span>
-          <span class="ps-info">
-            <span class="ps-label" id="ps-label">No profile</span>
-            <span class="ps-meta" id="ps-meta">Select a profile</span>
-          </span>
-          <span class="ps-chevron" aria-hidden="true">▾</span>
-        </button>
-        <div id="profile-dropdown" class="profile-dropdown" role="listbox" hidden>
-          <div class="pd-head">
-            <span>Profiles</span>
-            <button type="button" class="pd-manage" id="pd-manage" title="Manage profiles">Manage</button>
-          </div>
-          <div id="pd-list" class="pd-list"></div>
-          <div class="pd-empty" id="pd-empty" hidden>No profiles yet — open Manage to add one</div>
         </div>
       </div>
     </header>
@@ -106,19 +124,6 @@
 
       <div class="shell-main">
         <section id="alerts-bar" class="alerts-bar" hidden></section>
-
-        <section id="ops-strip" class="ops-strip" aria-live="polite">
-          <div class="ops-left">
-            <span id="ops-summary">no status yet</span>
-          </div>
-          <div class="ops-vitals" id="ops-vitals" hidden>
-            <span class="ov-item"><span class="ov-k">world</span> <span id="ops-world">—</span></span>
-            <span class="ov-item"><span class="ov-k">pos</span> <span id="ops-xyz">—</span></span>
-            <span class="ov-item"><span class="ov-k">hp</span> <span id="ops-hp">—</span></span>
-            <span class="ov-item"><span class="ov-k">food</span> <span id="ops-food">—</span></span>
-            <span class="ov-item"><span class="ov-k">ping</span> <span id="ops-ping">—</span></span>
-          </div>
-        </section>
 
         <main class="board">
       <!-- ========== MANAGE (profiles — not a main tab) ========== -->
@@ -205,140 +210,194 @@
             <h2>Play</h2>
             <p class="hint" id="active-bot-label">no profile selected</p>
           </div>
-          <button type="button" class="tab-settings-btn" data-open-settings="play" title="Play settings">⚙ Settings</button>
         </div>
 
-        <div class="card-block">
-          <h3 class="subhead">Connection</h3>
-          <div class="switch-grid">
-            <label class="task-toggle" data-feat="online">
-              <span class="tt-text"><strong>Online</strong><small>Connect &amp; auto-reconnect · off disconnects</small></span>
-              <input type="checkbox" name="online" role="switch" />
-              <span class="tt-switch" aria-hidden="true"></span>
-            </label>
-            <label class="task-toggle" id="toggle-lobby-wrap">
-              <span class="tt-text"><strong>Auto-lobby</strong><small>Walk portals into main after login</small></span>
-              <input type="checkbox" id="toggle-lobby" role="switch" />
-              <span class="tt-switch" aria-hidden="true"></span>
-            </label>
-            <label class="task-toggle" data-feat="antiAfk">
-              <span class="tt-text"><strong>Anti-AFK</strong><small>Light movement while idle</small></span>
-              <input type="checkbox" name="antiAfk" role="switch" />
-              <span class="tt-switch" aria-hidden="true"></span>
-            </label>
-            <label class="task-toggle" id="toggle-notify-wrap">
-              <span class="tt-text"><strong>Captcha notify</strong><small>Browser alerts for captcha kicks</small></span>
-              <input type="checkbox" id="toggle-notify" role="switch" />
-              <span class="tt-switch" aria-hidden="true"></span>
-            </label>
+        <div class="card-block collapsible" data-collapse-key="play-connection">
+          <div class="collapse-head">
+            <button type="button" class="collapse-toggle" aria-expanded="true" title="Collapse section">▾</button>
+            <h3 class="subhead">Connection</h3>
           </div>
-        </div>
-
-        <div class="card-block">
-          <h3 class="subhead">Status</h3>
-          <dl class="meta">
-            <div><dt>world</dt><dd id="world">—</dd></div>
-            <div><dt>dimension</dt><dd id="dimension">—</dd></div>
-            <div><dt>xyz</dt><dd id="xyz">—</dd></div>
-            <div><dt>ping</dt><dd id="ping">—</dd></div>
-            <div><dt>tab</dt><dd id="tab">—</dd></div>
-            <div><dt>uptime</dt><dd id="uptime">—</dd></div>
-          </dl>
-          <div class="bars">
-            <label>health <span id="hp-n">—</span></label>
-            <div class="bar hp" id="hp"><i></i></div>
-            <label>food <span id="food-n">—</span></label>
-            <div class="bar food" id="food"><i></i></div>
-          </div>
-          <p class="fault" id="fault" hidden></p>
-          <div class="captcha-banner" id="captcha-banner" hidden>
-            <div class="captcha-head">
-              <strong>Anti-bot / captcha</strong>
-              <button type="button" class="captcha-dismiss" id="captcha-dismiss" title="Dismiss">×</button>
+          <div class="collapse-body">
+            <div class="switch-grid">
+              <label class="task-toggle" data-feat="online">
+                <span class="tt-text"><strong>Online</strong><small>Connect &amp; auto-reconnect · off disconnects</small></span>
+                <input type="checkbox" name="online" role="switch" />
+                <span class="tt-switch" aria-hidden="true"></span>
+              </label>
+              <label class="task-toggle" id="toggle-lobby-wrap">
+                <span class="tt-text"><strong>Auto-lobby</strong><small>Walk portals into main after login</small></span>
+                <input type="checkbox" id="toggle-lobby" role="switch" />
+                <span class="tt-switch" aria-hidden="true"></span>
+              </label>
+              <label class="task-toggle" data-feat="antiAfk">
+                <span class="tt-text"><strong>Anti-AFK</strong><small>Light movement while idle</small></span>
+                <input type="checkbox" name="antiAfk" role="switch" />
+                <span class="tt-switch" aria-hidden="true"></span>
+              </label>
+              <label class="task-toggle" id="toggle-notify-wrap">
+                <span class="tt-text"><strong>Captcha notify</strong><small>Browser alerts for captcha kicks</small></span>
+                <input type="checkbox" id="toggle-notify" role="switch" />
+                <span class="tt-switch" aria-hidden="true"></span>
+              </label>
             </div>
-            <p class="captcha-reason" id="captcha-reason"></p>
-            <p class="captcha-code" id="captcha-code" hidden></p>
-            <div class="captcha-links" id="captcha-links"></div>
-            <p class="captcha-hint">Open a link, verify, then turn Online back on or use Manage → Start.</p>
           </div>
         </div>
 
-        <div class="card-block">
-          <h3 class="subhead">Nearby <span id="player-count"></span></h3>
-          <ul id="players" class="list"></ul>
+        <div class="card-block collapsible" data-collapse-key="play-status">
+          <div class="collapse-head">
+            <button type="button" class="collapse-toggle" aria-expanded="true" title="Collapse section">▾</button>
+            <h3 class="subhead">Status</h3>
+          </div>
+          <div class="collapse-body">
+            <dl class="meta">
+              <div><dt>world</dt><dd id="world">—</dd></div>
+              <div><dt>dimension</dt><dd id="dimension">—</dd></div>
+              <div><dt>xyz</dt><dd id="xyz">—</dd></div>
+              <div><dt>ping</dt><dd id="ping">—</dd></div>
+              <div><dt>tab</dt><dd id="tab">—</dd></div>
+              <div><dt>uptime</dt><dd id="uptime">—</dd></div>
+            </dl>
+            <div class="bars">
+              <label>health <span id="hp-n">—</span></label>
+              <div class="bar hp" id="hp"><i></i></div>
+              <label>food <span id="food-n">—</span></label>
+              <div class="bar food" id="food"><i></i></div>
+            </div>
+            <p class="fault" id="fault" hidden></p>
+            <div class="captcha-banner" id="captcha-banner" hidden>
+              <div class="captcha-head">
+                <strong>Anti-bot / captcha</strong>
+                <button type="button" class="captcha-dismiss" id="captcha-dismiss" title="Dismiss">×</button>
+              </div>
+              <p class="captcha-reason" id="captcha-reason"></p>
+              <p class="captcha-code" id="captcha-code" hidden></p>
+              <div class="captcha-links" id="captcha-links"></div>
+              <p class="captcha-hint">Open a link, verify, then turn Online back on or use Manage → Start.</p>
+            </div>
+          </div>
         </div>
 
-        <div class="card-block mc-inv-card" id="homes-window-card" hidden>
-          <div class="pack-head">
+        <div class="card-block collapsible" data-collapse-key="play-nearby">
+          <div class="collapse-head">
+            <button type="button" class="collapse-toggle" aria-expanded="true" title="Collapse section">▾</button>
+            <h3 class="subhead">Nearby <span id="player-count"></span></h3>
+          </div>
+          <div class="collapse-body">
+            <ul id="players" class="list"></ul>
+          </div>
+        </div>
+
+        <div class="card-block mc-inv-card collapsible" id="homes-window-card" data-collapse-key="play-homes" hidden>
+          <div class="collapse-head">
+            <button type="button" class="collapse-toggle" aria-expanded="true" title="Collapse section">▾</button>
             <h3 class="subhead" id="homes-window-title">Homes</h3>
             <button type="button" class="btn-quiet" id="homes-window-close" title="Close window">close</button>
           </div>
-          <p class="hint" id="homes-window-hint">click a home to teleport</p>
-          <div class="homes-grid" id="homes-window-grid"></div>
+          <div class="collapse-body">
+            <p class="hint" id="homes-window-hint">click a home to teleport</p>
+            <div class="homes-grid" id="homes-window-grid"></div>
+          </div>
         </div>
 
-        <div class="card-block mc-inv-card">
-          <div class="pack-head">
+        <div class="card-block mc-inv-card collapsible" data-collapse-key="play-inventory">
+          <div class="collapse-head">
+            <button type="button" class="collapse-toggle" aria-expanded="true" title="Collapse section">▾</button>
             <h3 class="subhead">Inventory</h3>
             <p class="hint" id="pack-held">hands empty</p>
           </div>
-          <div class="mc-inv" id="inv">
-            <div class="mc-inv-equip">
-              <div class="mc-armor" id="inv-gear" title="Armor"></div>
-              <div class="mc-figure">
-                <img id="inv-skin" class="mc-skin" alt="Player skin" width="64" height="128" decoding="async" />
-                <p class="mc-figure-label" id="inv-skin-name">skin</p>
+          <div class="collapse-body">
+            <div class="mc-inv" id="inv">
+              <div class="mc-inv-equip">
+                <div class="mc-armor" id="inv-gear" title="Armor"></div>
+                <div class="mc-figure">
+                  <img id="inv-skin" class="mc-skin" alt="Player skin" width="64" height="128" decoding="async" />
+                  <p class="mc-figure-label" id="inv-skin-name">skin</p>
+                </div>
+                <div class="mc-offhand-col">
+                  <div class="mc-offhand" id="inv-offhand" title="Offhand"></div>
+                  <span class="mc-slot-label">off</span>
+                </div>
               </div>
-              <div class="mc-offhand-col">
-                <div class="mc-offhand" id="inv-offhand" title="Offhand"></div>
-                <span class="mc-slot-label">off</span>
+              <div class="mc-inv-storage">
+                <div class="inv-main" id="inv-main"></div>
+              </div>
+              <div class="mc-inv-hotbar">
+                <div class="inv-hot" id="inv-hot"></div>
               </div>
             </div>
-            <div class="mc-inv-storage">
-              <div class="inv-main" id="inv-main"></div>
-            </div>
-            <div class="mc-inv-hotbar">
-              <div class="inv-hot" id="inv-hot"></div>
+            <p class="inv-name" id="inv-name">click a slot · click another to swap</p>
+            <div class="inv-acts">
+              <button type="button" data-inv="hold">hold</button>
+              <button type="button" data-inv="drop">drop</button>
+              <button type="button" data-inv="dropStack">toss</button>
+              <button type="button" data-inv="equip">equip</button>
+              <button type="button" data-inv="offhand">offhand</button>
+              <button type="button" data-inv="use">use</button>
             </div>
           </div>
-          <p class="inv-name" id="inv-name">click a slot · click another to swap</p>
-          <div class="inv-acts">
-            <button type="button" data-inv="hold">hold</button>
-            <button type="button" data-inv="drop">drop</button>
-            <button type="button" data-inv="dropStack">toss</button>
-            <button type="button" data-inv="equip">equip</button>
-            <button type="button" data-inv="offhand">offhand</button>
-            <button type="button" data-inv="use">use</button>
+        </div>
+
+        <div class="card-block survey-block collapsible" id="survey-slot-play" data-collapse-key="play-survey">
+          <div class="collapse-head survey-collapse-head">
+            <button type="button" class="collapse-toggle" aria-expanded="true" title="Collapse section">▾</button>
+            <h3 class="subhead">3D view</h3>
+            <div class="module-toggle-row" role="group" aria-label="3D view on or off">
+              <button type="button" id="survey-3d-off" class="view3d-btn" title="Stop fetching terrain (saves data)">3D off</button>
+              <button type="button" id="survey-3d-on" class="view3d-btn on" title="Show live terrain around the bot">3D on</button>
+            </div>
+          </div>
+          <div class="collapse-body">
+            <div class="survey-mount" id="survey-mount-play"></div>
           </div>
         </div>
 
-        <div class="card-block survey-block" id="survey-slot-play">
-          <div class="survey-mount" id="survey-mount-play"></div>
+        <div class="card-block collapsible" data-collapse-key="play-goto">
+          <div class="collapse-head">
+            <button type="button" class="collapse-toggle" aria-expanded="true" title="Collapse section">▾</button>
+            <h3 class="subhead">Goto</h3>
+          </div>
+          <div class="collapse-body">
+            <form id="goto" class="goto">
+              <input name="x" placeholder="x" inputmode="decimal" />
+              <input name="y" placeholder="y" inputmode="decimal" />
+              <input name="z" placeholder="z" inputmode="decimal" />
+              <button type="submit">goto</button>
+            </form>
+          </div>
         </div>
 
-        <div class="card-block">
-          <form id="goto" class="goto">
-            <input name="x" placeholder="x" inputmode="decimal" />
-            <input name="y" placeholder="y" inputmode="decimal" />
-            <input name="z" placeholder="z" inputmode="decimal" />
-            <button type="submit">goto</button>
-          </form>
-        </div>
-
-        <div class="card-block wire-block" data-wire-root="play">
-          <div class="wire-head">
+        <div class="card-block wire-block collapsible" data-wire-root="play" data-collapse-key="play-wire">
+          <div class="collapse-head wire-collapse-head">
+            <button type="button" class="collapse-toggle" aria-expanded="true" title="Collapse section">▾</button>
             <h3 class="subhead">Wire</h3>
-            <span class="wire-hint mute">Main + whisper tabs (6b-style)</span>
-          </div>
-          <div class="wire-tabs" id="wire-tabs" role="tablist" aria-label="Chat tabs"></div>
-          <ol class="log wire-log" id="log"></ol>
-          <form id="say" class="say say-with-suggest">
-            <div class="say-field">
-              <input id="say-input" autocomplete="off" spellcheck="false" placeholder="say in chat, or /command" />
-              <ul id="say-suggest" class="say-suggest" hidden role="listbox"></ul>
+            <div class="module-toggle-row" role="group" aria-label="Chat on or off">
+              <button type="button" id="chat-off" class="view3d-btn" title="Hide chat log and input">Chat off</button>
+              <button type="button" id="chat-on" class="view3d-btn on" title="Show chat">Chat on</button>
             </div>
-            <button type="submit">send</button>
-          </form>
+          </div>
+          <div class="collapse-body wire-collapse-body">
+            <span class="wire-hint mute">Main + whisper tabs (6b-style)</span>
+            <div class="wire-tabs" id="wire-tabs" role="tablist" aria-label="Chat tabs"></div>
+            <div class="tpa-banner" id="tpa-banner" hidden>
+              <span class="tpa-label">TPA from <strong class="tpa-player">?</strong></span>
+              <span class="tpa-actions">
+                <button type="button" class="tpa-btn tpa-accept">Accept</button>
+                <button type="button" class="tpa-btn tpa-deny">Deny</button>
+                <button type="button" class="tpa-btn tpa-dismiss ghost" title="Dismiss">×</button>
+              </span>
+            </div>
+            <div class="wire-log-wrap">
+              <ol class="log wire-log" id="log"></ol>
+              <button type="button" class="wire-jump-bottom" hidden title="Jump to latest messages">↓ Latest</button>
+            </div>
+            <form id="say" class="say say-with-suggest">
+              <div class="say-field">
+                <input id="say-input" autocomplete="off" spellcheck="false" placeholder="say in chat, or /command" />
+                <ul id="say-suggest" class="say-suggest" hidden role="listbox"></ul>
+              </div>
+              <button type="submit">send</button>
+            </form>
+          </div>
         </div>
       </section>
 
@@ -352,6 +411,31 @@
           </div>
           <button type="button" class="tab-settings-btn" data-open-settings="detect" title="Detection settings">⚙ Settings</button>
         </div>
+        <div class="card-block collapsible" data-collapse-key="detect-listener">
+          <div class="collapse-head">
+            <button type="button" class="collapse-toggle" aria-expanded="true" title="Collapse section">▾</button>
+            <h3 class="subhead">Packet listener</h3>
+          </div>
+          <div class="collapse-body">
+            <p class="hint">Debug dump for this profile only → <code>logs/packetlistener/&lt;nickname&gt;.ndjson</code></p>
+            <div class="switch-grid">
+              <label class="task-toggle" id="toggle-server-listener-wrap">
+                <span class="tt-text"><strong>Server packet listener</strong><small>Log server→client packets</small></span>
+                <input type="checkbox" id="toggle-server-listener" role="switch" />
+                <span class="tt-switch" aria-hidden="true"></span>
+              </label>
+              <label class="task-toggle" id="toggle-server-listener-out-wrap">
+                <span class="tt-text"><strong>Also client→server</strong><small>Include outbound packets</small></span>
+                <input type="checkbox" id="toggle-server-listener-out" role="switch" />
+                <span class="tt-switch" aria-hidden="true"></span>
+              </label>
+            </div>
+            <div class="settings-actions" style="margin-top:0.5rem">
+              <button type="button" id="clear-server-listener" class="ghost" title="Truncate logs/packetlistener/&lt;nickname&gt;.ndjson">Clear listener log</button>
+            </div>
+          </div>
+        </div>
+
         <div class="detect-log card-block">
           <div class="panel-head-row">
             <h3>Event log</h3>
@@ -396,10 +480,6 @@
           </div>
         </div>
 
-        <div class="card-block survey-block" id="survey-slot-map">
-          <div class="survey-mount" id="survey-mount-map"></div>
-        </div>
-
         <div class="card-block">
           <form id="goto-map" class="goto">
             <input name="x" placeholder="x" inputmode="decimal" />
@@ -409,21 +489,6 @@
           </form>
         </div>
 
-        <div class="card-block wire-block" data-wire-root="map">
-          <div class="wire-head">
-            <h3 class="subhead">Wire</h3>
-            <span class="wire-hint mute">Same tabs as Play</span>
-          </div>
-          <div class="wire-tabs" id="wire-tabs-map" role="tablist" aria-label="Chat tabs"></div>
-          <ol class="log wire-log" id="log-map"></ol>
-          <form id="say-map" class="say say-with-suggest">
-            <div class="say-field">
-              <input id="say-input-map" autocomplete="off" spellcheck="false" placeholder="say in chat, or /command" />
-              <ul id="say-suggest-map" class="say-suggest" hidden role="listbox"></ul>
-            </div>
-            <button type="submit">send</button>
-          </form>
-        </div>
       </section>
 
       <!-- ========== ANNOUNCE ========== -->
@@ -456,7 +521,7 @@
         <div class="settings-head">
           <div>
             <h2>Settings</h2>
-            <p class="hint">Dashboard + process controls (everything else lives under each tab’s ⚙)</p>
+            <p class="hint">Process controls + connection for the selected profile. Module ⚙ (Map / Detect / …) stay on their tabs.</p>
           </div>
         </div>
 
@@ -470,6 +535,60 @@
             <button type="button" id="settings-save-global" class="primary">Save process</button>
           </div>
         </div>
+
+        <div class="card-block">
+          <h3 class="subhead">Connection</h3>
+          <p class="hint" id="connection-settings-path">Process defaults + selected profile overrides</p>
+          <form id="connection-settings-form" class="settings-form">
+            <p class="subhead" style="margin:0.25rem 0 0.35rem;font-size:0.78rem">Defaults (process-wide)</p>
+            <label>Default server host<input name="MC_HOST" placeholder="alt3.6b6t.org" autocomplete="off" /></label>
+            <label>Host failover list<input name="MC_HOSTS" placeholder="alt3.6b6t.org,alt.6b6t.org,…" autocomplete="off" /></label>
+            <p class="help">Comma-separated hosts tried in order when the primary fails</p>
+            <label>Default server port<input name="MC_PORT" type="number" placeholder="25565" /></label>
+            <label>Default protocol version<input name="MC_VERSION" placeholder="1.21.11" autocomplete="off" /></label>
+
+            <p class="subhead" style="margin:1rem 0 0.35rem;font-size:0.78rem">Selected profile</p>
+            <p class="hint" id="connection-profile-hint">Select a profile in the top bar for profile overrides</p>
+            <label>Host override <small class="mute">(blank = use default)</small><input name="host" placeholder="leave blank for default" autocomplete="off" /></label>
+            <label>Port override <small class="mute">(blank = use default)</small><input name="port" type="number" placeholder="leave blank for default" /></label>
+            <label>Protocol override <small class="mute">(blank = use default)</small><input name="version" placeholder="leave blank for default" autocomplete="off" /></label>
+            <label>View distance<input name="viewDistance" type="number" min="2" max="32" placeholder="8" /></label>
+            <label>Auto-lobby
+              <select name="autoLobby">
+                <option value="true">On</option>
+                <option value="false">Off</option>
+              </select>
+            </label>
+            <label>Auto-reconnect
+              <select name="autoReconnect">
+                <option value="true">On</option>
+                <option value="false">Off</option>
+              </select>
+            </label>
+            <label>Server portals required
+              <input name="requiredServerPortals" type="number" min="0" max="8" placeholder="2" />
+            </label>
+            <label>Portal retry (ms)
+              <input name="portalRetryMs" type="number" min="1000" step="500" placeholder="8000" />
+            </label>
+            <label>Reconnect delay (ms)
+              <input name="reconnectMs" type="number" min="500" step="500" placeholder="5000" />
+            </label>
+            <label>Reconnect max (ms)
+              <input name="reconnectMaxMs" type="number" min="1000" step="1000" placeholder="120000" />
+            </label>
+            <label>Rate-limit cooldown (ms)
+              <input name="rateLimitCooldownMs" type="number" min="0" step="1000" placeholder="45000" />
+            </label>
+            <label>Captcha cooldown (ms, 0=halt)
+              <input name="captchaCooldownMs" type="number" min="0" step="1000" placeholder="3600000" />
+            </label>
+          </form>
+          <p class="settings-msg" id="settings-msg-connection" hidden></p>
+          <div class="settings-actions">
+            <button type="button" id="settings-save-connection" class="primary">Save connection</button>
+          </div>
+        </div>
       </section>
 
       <!-- Tab settings drawer (per-profile fields, one place each) -->
@@ -481,42 +600,9 @@
           </div>
           <p class="hint" id="tab-settings-path">Select a profile first</p>
           <form id="profile-settings-form" class="settings-form tab-settings-body">
-            <!-- PLAY -->
-            <div class="tab-settings-block" data-for="play">
-              <label>Host override<input name="host" placeholder="Process / default host" /></label>
-              <label>Port override<input name="port" type="number" placeholder="25565" /></label>
-              <label>Protocol version<input name="version" placeholder="1.21.11" /></label>
-              <label>View distance<input name="viewDistance" type="number" min="2" max="32" placeholder="8" /></label>
-              <label>Auto-lobby
-                <select name="autoLobby">
-                  <option value="true">On</option>
-                  <option value="false">Off</option>
-                </select>
-              </label>
-              <label>Auto-reconnect
-                <select name="autoReconnect">
-                  <option value="true">On</option>
-                  <option value="false">Off</option>
-                </select>
-              </label>
-              <label>Server portals required
-                <input name="requiredServerPortals" type="number" min="0" max="8" placeholder="2" />
-              </label>
-              <label>Portal retry (ms)
-                <input name="portalRetryMs" type="number" min="1000" step="500" placeholder="8000" />
-              </label>
-              <label>Reconnect delay (ms)
-                <input name="reconnectMs" type="number" min="500" step="500" placeholder="5000" />
-              </label>
-              <label>Reconnect max (ms)
-                <input name="reconnectMaxMs" type="number" min="1000" step="1000" placeholder="120000" />
-              </label>
-              <label>Rate-limit cooldown (ms)
-                <input name="rateLimitCooldownMs" type="number" min="0" step="1000" placeholder="45000" />
-              </label>
-              <label>Captcha cooldown (ms, 0=halt)
-                <input name="captchaCooldownMs" type="number" min="0" step="1000" placeholder="3600000" />
-              </label>
+            <!-- PLAY connection settings live under top-bar Settings tab -->
+            <div class="tab-settings-block" data-for="play" hidden>
+              <p class="hint">Connection settings moved to top-bar Settings.</p>
             </div>
             <!-- MAP -->
             <div class="tab-settings-block" data-for="map" hidden>
@@ -550,10 +636,14 @@
             </div>
             <!-- DETECT -->
             <div class="tab-settings-block" data-for="detect" hidden>
-              <p class="hint">What to log, and how often to re-scan loaded entities (fixes missed leave events after teleports).</p>
+              <p class="hint">What to log, and how often to re-scan loaded entities (fixes missed leave events after teleports). Saved per profile under Settings/Profiles.</p>
               <label>Player recheck interval (ms)
                 <input name="detectionRecheckMs" type="number" min="500" step="500" placeholder="3000" />
               </label>
+              <label>Player leave grace (ms)
+                <input name="detectionPlayerLeaveGraceMs" type="number" min="0" step="1000" placeholder="60000" />
+              </label>
+              <p class="hint">How long a player may leave render range before counting as left. Re-entry within this window does not log or notify leave/enter. Default 60000 (1 min).</p>
               <label>Detect players
                 <select name="detectionPlayers">
                   <option value="true">On</option>
@@ -585,19 +675,6 @@
                 </select>
               </label>
 
-              <p class="hint" style="margin-top:0.85rem">Debug — packet listener for <strong>this profile only</strong> (Settings/serverlistener-&lt;username&gt;.ndjson)</p>
-              <label>Server packet listener
-                <select name="serverListener">
-                  <option value="false">Off</option>
-                  <option value="true">On</option>
-                </select>
-              </label>
-              <label>Also log client→server packets
-                <select name="serverListenerOutbound">
-                  <option value="true">On</option>
-                  <option value="false">Off</option>
-                </select>
-              </label>
               <label>Anti-AFK interval (ms)
                 <input name="antiAfkIntervalMs" type="number" min="5000" step="1000" placeholder="60000" />
               </label>
@@ -684,15 +761,13 @@
     <!-- Shared 3D survey — moved between Play and Map; gamepad always sits under the stage -->
     <div id="survey-shared" class="survey-shared" hidden>
       <div class="survey-head">
-        <div>
-          <h3 class="subhead">3D view</h3>
-          <p class="hint" id="survey-hint">follow mode · gamepad below · orbit: drag stage</p>
+        <div class="survey-head-top">
+          <div>
+            <p class="hint" id="survey-hint">follow mode · gamepad below · orbit: drag stage</p>
+          </div>
+          <p class="survey-meta" id="survey-meta">no terrain yet</p>
         </div>
-        <p class="survey-meta" id="survey-meta">no terrain yet</p>
         <div class="survey-tools">
-          <button type="button" id="survey-3d-off" class="view3d-btn" title="Stop fetching terrain (saves data)">3D off</button>
-          <button type="button" id="survey-3d-on" class="view3d-btn on" title="Show live terrain around the bot">3D on</button>
-          <span class="survey-tools-sep" aria-hidden="true"></span>
           <button type="button" id="view3d-quality-lite" class="view3d-btn on" title="Low quality terrain (less data)">Lite</button>
           <button type="button" id="view3d-quality-full" class="view3d-btn" title="Full quality terrain (more detail)">Full</button>
           <span class="survey-tools-sep" aria-hidden="true"></span>

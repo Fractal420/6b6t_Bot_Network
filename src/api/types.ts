@@ -372,6 +372,7 @@ export type ControlRequest =
   | { action: "players" }
   | { action: "detection" }
   | { action: "clearDetection" }
+  | { action: "clearServerListener"; username?: string }
   | { action: "entities" }
   | { action: "inventory" }
   | ({ action: "inv" } & InvCommand)

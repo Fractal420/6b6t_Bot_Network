@@ -18,11 +18,54 @@ let lastCaptchaKey = "";
 let lastNotifiedCaptchaKey = "";
 let swRegistration = null;
 let fleetState = null;
+/**
+ * Selected profile is per browser tab:
+ * 1) ?profile=<id> (or ?botId=) in the URL — open each profile in its own tab
+ * 2) sessionStorage for this tab only (refresh keeps selection; other tabs unaffected)
+ */
+function readProfileIdFromUrl() {
+  try {
+    const params = new URLSearchParams(location.search);
+    return (params.get("profile") || params.get("botId") || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function writeProfileIdToUrl(id) {
+  try {
+    const url = new URL(location.href);
+    if (id) {
+      url.searchParams.set("profile", id);
+      url.searchParams.delete("botId");
+    } else {
+      url.searchParams.delete("profile");
+      url.searchParams.delete("botId");
+    }
+    history.replaceState(null, "", url.pathname + url.search + url.hash);
+  } catch {
+    /* ignore */
+  }
+}
+
+function profileTabUrl(id) {
+  try {
+    const url = new URL(location.href);
+    if (id) {
+      url.searchParams.set("profile", id);
+      url.searchParams.delete("botId");
+    }
+    return url.pathname + url.search + url.hash;
+  } catch {
+    return `?profile=${encodeURIComponent(id || "")}`;
+  }
+}
+
 let selectedBotId = "";
 try {
-  selectedBotId = localStorage.getItem("fractal-bot-id") || "";
+  selectedBotId = readProfileIdFromUrl() || sessionStorage.getItem("fractal-bot-id") || "";
 } catch {
-  selectedBotId = "";
+  selectedBotId = readProfileIdFromUrl() || "";
 }
 
 function token() {
@@ -419,16 +462,24 @@ function notificationPermission() {
   return Notification.permission;
 }
 
-/** Keep captcha-notify checkbox in sync with local preference only (never auto-toggle). */
+/** Keep captcha-notify control in sync with local preference (settings select + legacy toggle). */
 function syncNotifyToggleUi(force = false) {
-  const btn = document.getElementById("toggle-notify");
-  if (!btn) return;
-  if (!force && (btn.dataset.userTouched === "1" || connectionSwitchLocked("notify"))) return;
   const perm = notificationPermission();
   const want = notifyPrefEnabled() && perm !== "denied" && perm !== "unsupported";
-  btn.checked = want;
-  btn.closest(".task-toggle")?.classList.toggle("on", want);
-  btn.closest(".task-toggle")?.classList.toggle("warn", perm === "denied");
+  const btn = document.getElementById("toggle-notify");
+  if (btn) {
+    if (!force && (btn.dataset.userTouched === "1" || connectionSwitchLocked("notify"))) {
+      /* keep user interaction */
+    } else {
+      btn.checked = want;
+      btn.closest(".task-toggle")?.classList.toggle("on", want);
+      btn.closest(".task-toggle")?.classList.toggle("warn", perm === "denied");
+    }
+  }
+  const form = document.getElementById("profile-settings-form");
+  if (form?.captchaNotify) {
+    form.captchaNotify.value = want ? "true" : "false";
+  }
 }
 
 /** @deprecated name kept for older call sites */
@@ -535,13 +586,42 @@ const WIRE_MAX_PER_TAB = 300;
 const WHISPER_CMD = "w";
 const WHISPER_ALIASES = new Set(["w", "msg", "tell", "whisper", "message"]);
 
-/** @type {{ active: string, order: string[], tabs: Map<string, { key: string, name: string, unread: number, messages: object[] }> }} */
+/** Wire chat is per profile — switching profiles swaps the whole log/tabs. */
+const wireByProfile = new Map();
+
+function emptyWireState() {
+  return {
+    active: WIRE_MAIN,
+    order: [WIRE_MAIN],
+    tabs: new Map([
+      [WIRE_MAIN, { key: WIRE_MAIN, name: "Main", unread: 0, messages: [] }],
+    ]),
+  };
+}
+
+function currentWire() {
+  const id = selectedBotId || "_none";
+  if (!wireByProfile.has(id)) wireByProfile.set(id, emptyWireState());
+  return wireByProfile.get(id);
+}
+
+/** Compatibility accessor: always the selected profile's wire state. */
 const wireChat = {
-  active: WIRE_MAIN,
-  order: [WIRE_MAIN],
-  tabs: new Map([
-    [WIRE_MAIN, { key: WIRE_MAIN, name: "Main", unread: 0, messages: [] }],
-  ]),
+  get active() {
+    return currentWire().active;
+  },
+  set active(v) {
+    currentWire().active = v;
+  },
+  get order() {
+    return currentWire().order;
+  },
+  set order(v) {
+    currentWire().order = v;
+  },
+  get tabs() {
+    return currentWire().tabs;
+  },
 };
 
 const PLAYER_NAME_RE = "[A-Za-z0-9_.\\-]{2,32}";
@@ -589,6 +669,28 @@ const OUTGOING_WHISPER_RE = new RegExp(
   "i",
 );
 
+
+/** 6b6t-style incoming TPA request */
+const TPA_REQUEST_RE = new RegExp(
+  TS_PREFIX +
+    HEAD_PREFIX +
+    ICON_PREFIX +
+    `(${PLAYER_NAME_RE})\\s+wants\\s+to\\s+teleport\\s+to\\s+you\\.?\\s*$`,
+  "i",
+);
+const TPA_HINT_RE = new RegExp(
+  TS_PREFIX +
+    HEAD_PREFIX +
+    ICON_PREFIX +
+    `Type\\s+/tpy\\s+(${PLAYER_NAME_RE})\\s+to\\s+accept\\s+or\\s+/tpn\\s+\\1\\s+to\\s+deny\\.?\\s*$`,
+  "i",
+);
+const TPA_HINT_LOOSE_RE = new RegExp(
+  TS_PREFIX +
+    `Type\\s+/tpy\\s+(${PLAYER_NAME_RE})\\s+to\\s+accept.*?/tpn\\s+(${PLAYER_NAME_RE})\\s+to\\s+deny`,
+  "i",
+);
+
 function classifyWireMessage(raw) {
   const text = String(raw || "").trim();
   if (!text) return { type: "system", text };
@@ -615,6 +717,14 @@ function classifyWireMessage(raw) {
         key: player.toLowerCase(),
       };
     }
+  }
+  const tpa = text.match(TPA_REQUEST_RE);
+  if (tpa?.[1] && !/^(you|me)$/i.test(tpa[1])) {
+    return { type: "tpa", player: tpa[1], text, key: tpa[1].toLowerCase() };
+  }
+  const hint = text.match(TPA_HINT_RE) || text.match(TPA_HINT_LOOSE_RE);
+  if (hint?.[1] && !/^(you|me)$/i.test(hint[1])) {
+    return { type: "tpa_hint", player: hint[1], text, key: hint[1].toLowerCase() };
   }
   return { type: "public", text };
 }
@@ -662,22 +772,128 @@ function appendEntryToLog(el, entry) {
   el.append(li);
 }
 
+let pendingTpaPlayer = null;
+
+function showTpaBanner(player) {
+  pendingTpaPlayer = player;
+  const banner = document.getElementById("tpa-banner");
+  if (!banner) return;
+  banner.hidden = false;
+  const nameEl = banner.querySelector(".tpa-player");
+  if (nameEl) nameEl.textContent = player;
+}
+
+function hideTpaBanner() {
+  pendingTpaPlayer = null;
+  const banner = document.getElementById("tpa-banner");
+  if (banner) banner.hidden = true;
+}
+
+async function respondTpa(entryOrPlayer, action) {
+  const player =
+    typeof entryOrPlayer === "string"
+      ? entryOrPlayer
+      : entryOrPlayer?.player || pendingTpaPlayer;
+  if (!player) return;
+  const cmd = action === "accept" ? `tpy ${player}` : `tpn ${player}`;
+  try {
+    await rpc("command", { command: cmd });
+    push("sys", `/${cmd}`);
+    for (const tab of wireChat.tabs.values()) {
+      for (const m of tab.messages) {
+        if (m.kind === "tpa" && m.playerKey === String(player).toLowerCase() && m.tpaPending) {
+          m.tpaPending = false;
+          m.tpaResolved = action;
+        }
+      }
+    }
+    if (pendingTpaPlayer && pendingTpaPlayer.toLowerCase() === String(player).toLowerCase()) {
+      hideTpaBanner();
+    }
+    renderActiveWireLog();
+  } catch (err) {
+    push("err", `TPA ${action} failed: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+function bindTpaBanner(id) {
+  const banner = document.getElementById(id);
+  if (!banner || banner.dataset.bound) return;
+  banner.dataset.bound = "1";
+  banner.querySelector(".tpa-accept")?.addEventListener("click", () => {
+    void respondTpa(pendingTpaPlayer, "accept");
+  });
+  banner.querySelector(".tpa-deny")?.addEventListener("click", () => {
+    void respondTpa(pendingTpaPlayer, "deny");
+  });
+  banner.querySelector(".tpa-dismiss")?.addEventListener("click", () => hideTpaBanner());
+}
+bindTpaBanner("tpa-banner");
+
+
+const WIRE_STICK_PX = 56;
+
+function isWireLogPinned(el) {
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= WIRE_STICK_PX;
+}
+
+function updateWireJumpButton(el) {
+  const wrap = el?.closest?.(".wire-log-wrap");
+  const btn = wrap?.querySelector?.(".wire-jump-bottom");
+  if (!btn) return;
+  const show = el.scrollHeight > el.clientHeight + 8 && !isWireLogPinned(el);
+  btn.hidden = !show;
+}
+
+function scrollWireLogToBottom(el) {
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  updateWireJumpButton(el);
+}
+
 function renderActiveWireLog() {
   const tab = wireChat.tabs.get(wireChat.active) || wireChat.tabs.get(WIRE_MAIN);
   const logs = document.querySelectorAll(".wire-log");
   for (const el of logs) {
+    const pinned = isWireLogPinned(el);
     el.replaceChildren();
-    if (!tab) continue;
+    if (!tab) {
+      updateWireJumpButton(el);
+      continue;
+    }
     for (const entry of tab.messages) appendEntryToLog(el, entry);
-    el.scrollTop = el.scrollHeight;
+    if (pinned) scrollWireLogToBottom(el);
+    else updateWireJumpButton(el);
   }
 }
 
+function bindWireLogScrollBehavior() {
+  for (const el of document.querySelectorAll(".wire-log")) {
+    if (el.dataset.scrollBound) continue;
+    el.dataset.scrollBound = "1";
+    el.addEventListener(
+      "scroll",
+      () => {
+        updateWireJumpButton(el);
+      },
+      { passive: true },
+    );
+  }
+  for (const btn of document.querySelectorAll(".wire-jump-bottom")) {
+    if (btn.dataset.bound) continue;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", () => {
+      const wrap = btn.closest(".wire-log-wrap");
+      const log = wrap?.querySelector?.(".wire-log");
+      scrollWireLogToBottom(log);
+    });
+  }
+}
+bindWireLogScrollBehavior();
+
 function renderWireTabs() {
-  const bars = [
-    document.getElementById("wire-tabs"),
-    document.getElementById("wire-tabs-map"),
-  ].filter(Boolean);
+  const bars = [document.getElementById("wire-tabs")].filter(Boolean);
   for (const bar of bars) {
     bar.replaceChildren();
     for (const key of wireChat.order) {
@@ -750,29 +966,52 @@ function updateWirePlaceholder() {
   const ph = isPrivate
     ? `Reply to ${active.name} (or /command)`
     : "say in chat, or /command";
-  for (const id of ["say-input", "say-input-map"]) {
+  for (const id of ["say-input"]) {
     const input = document.getElementById(id);
     if (input) input.placeholder = ph;
   }
 }
 
-function pushWireEntry(entry) {
-  const main = ensureWireTab(WIRE_MAIN, "Main");
+function wireStateFor(botId) {
+  const id = botId || selectedBotId || "_none";
+  if (!wireByProfile.has(id)) wireByProfile.set(id, emptyWireState());
+  return wireByProfile.get(id);
+}
+
+function ensureWireTabIn(state, key, name) {
+  if (state.tabs.has(key)) {
+    const tab = state.tabs.get(key);
+    if (name && tab.name !== name) tab.name = name;
+    return tab;
+  }
+  const tab = { key, name: name || key, unread: 0, messages: [] };
+  state.tabs.set(key, tab);
+  if (!state.order.includes(key)) state.order.push(key);
+  return tab;
+}
+
+function pushWireEntry(entry, botId) {
+  const targetId = botId || selectedBotId || "_none";
+  const state = wireStateFor(targetId);
+  const main = ensureWireTabIn(state, WIRE_MAIN, "Main");
   main.messages.push(entry);
   if (main.messages.length > WIRE_MAX_PER_TAB) main.messages.splice(0, main.messages.length - WIRE_MAX_PER_TAB);
 
   if (entry.playerKey && entry.playerKey !== WIRE_MAIN) {
-    const priv = ensureWireTab(entry.playerKey, entry.player || entry.playerKey);
+    const priv = ensureWireTabIn(state, entry.playerKey, entry.player || entry.playerKey);
     priv.messages.push(entry);
     if (priv.messages.length > WIRE_MAX_PER_TAB) priv.messages.splice(0, priv.messages.length - WIRE_MAX_PER_TAB);
-    if (wireChat.active !== priv.key) priv.unread += 1;
+    if (state.active !== priv.key) priv.unread += 1;
   }
 
-  renderWireTabs();
-  renderActiveWireLog();
+  // Only redraw if this is the profile currently on screen
+  if (targetId === (selectedBotId || "_none")) {
+    renderWireTabs();
+    renderActiveWireLog();
+  }
 }
 
-function push(kind, text, links) {
+function push(kind, text, links, botId) {
   const raw = text == null ? "" : String(text);
   let entry = {
     kind: kind || "",
@@ -793,6 +1032,10 @@ function push(kind, text, links) {
         at: entry.at,
       };
     } else if (c.type === "whisper_out") {
+      // Already shown from the /w command we sent — skip server echo
+      if (isDuplicateOutgoingWhisper(c.player, c.body)) {
+        return;
+      }
       entry = {
         kind: "whisper-out",
         text: raw,
@@ -801,10 +1044,43 @@ function push(kind, text, links) {
         playerKey: c.key,
         at: entry.at,
       };
+    } else if (c.type === "tpa" || c.type === "tpa_hint") {
+      entry = {
+        kind: "tpa",
+        text: raw,
+        player: c.player,
+        playerKey: c.key,
+        at: entry.at,
+        tpaPending: true,
+      };
+      // Banner only when this profile is selected
+      if (!botId || botId === selectedBotId) showTpaBanner(c.player);
     }
   }
 
-  pushWireEntry(entry);
+  pushWireEntry(entry, botId);
+}
+
+/** Recent locally-sent whispers (suppress server-echo duplicates). */
+const recentOutgoingWhispers = [];
+const OUTGOING_WHISPER_DEDUP_MS = 8000;
+
+function rememberOutgoingWhisper(player, body) {
+  const key = `${String(player).toLowerCase()}\0${String(body || "").trim()}`;
+  recentOutgoingWhispers.push({ key, at: Date.now() });
+  while (recentOutgoingWhispers.length > 40) recentOutgoingWhispers.shift();
+}
+
+function isDuplicateOutgoingWhisper(player, body) {
+  const key = `${String(player).toLowerCase()}\0${String(body || "").trim()}`;
+  const now = Date.now();
+  while (recentOutgoingWhispers.length && now - recentOutgoingWhispers[0].at > OUTGOING_WHISPER_DEDUP_MS) {
+    recentOutgoingWhispers.shift();
+  }
+  const idx = recentOutgoingWhispers.findIndex((x) => x.key === key);
+  if (idx < 0) return false;
+  recentOutgoingWhispers.splice(idx, 1);
+  return true;
 }
 
 /** Parse `/w name body` style outbound so we open/bump the private tab immediately. */
@@ -817,6 +1093,7 @@ function noteOutgoingWhisperCommand(commandText) {
   const player = parts[1];
   const body = parts.slice(2).join(" ");
   if (!player || !body) return;
+  rememberOutgoingWhisper(player, body);
   pushWireEntry({
     kind: "whisper-out",
     text: `You whisper to ${player}: ${body}`,
@@ -824,6 +1101,7 @@ function noteOutgoingWhisperCommand(commandText) {
     player,
     playerKey: player.toLowerCase(),
     at: fmtLocalTime(),
+    localEcho: true,
   });
 }
 
@@ -837,15 +1115,16 @@ async function sendWireMessage(text) {
     const homeMatch = cmd.match(/^(sethome|delhome)\s+(\S+)/i);
     if (homeMatch) {
       if (homeMatch[1].toLowerCase() === "sethome") rememberHomes([homeMatch[2]]);
-      else knownHomeNames.delete(homeMatch[2]);
+      else forgetHomeName(homeMatch[2]);
     }
     // Dedicated path: wait for GUI and seed home list (server tab-complete is broken on 6b6t)
     if (/^homes\b/i.test(cmd)) {
       const res = await rpc("openHomes");
       if (res.ok && res.data) {
         renderInventory(res.data);
-        if (Array.isArray(res.data.homes)) rememberHomes(res.data.homes);
+        if (Array.isArray(res.data.homes)) replaceHomes(res.data.homes);
         if (res.data.homesDialog?.homes?.length) {
+          replaceHomes(res.data.homesDialog.homes);
           showHomesDialogPanel(res.data.homesDialog.title || "Homes", res.data.homesDialog.homes);
           push("sys", `homes dialog (${res.data.homesDialog.homes.length} homes)`);
         } else if (res.data.window?.slots?.length) {
@@ -925,15 +1204,33 @@ const PLAYER_ARG_COMMANDS = new Set(
 /** Commands whose first argument is a home name (tab-complete from server). */
 const HOME_ARG_COMMANDS = new Set(["home", "delhome"]);
 
-/** Cached home names learned from tab-complete and /homes window. */
-const knownHomeNames = new Set();
+/** Home names per profile id — never mixed across accounts. */
+const homesByProfile = new Map();
 
-function rememberHomes(names) {
+function homesSetFor(botId) {
+  const id = botId || selectedBotId || "_none";
+  if (!homesByProfile.has(id)) homesByProfile.set(id, new Set());
+  return homesByProfile.get(id);
+}
+
+function rememberHomes(names, botId) {
   if (!Array.isArray(names)) return;
+  const set = homesSetFor(botId);
   for (const n of names) {
     const s = String(n || "").trim();
-    if (s && !s.includes(" ")) knownHomeNames.add(s);
+    if (s && !s.includes(" ")) set.add(s);
   }
+}
+
+function forgetHomeName(name, botId) {
+  homesSetFor(botId).delete(String(name || "").trim());
+}
+
+/** Replace the full list for a profile (e.g. after /homes). */
+function replaceHomes(names, botId) {
+  const set = homesSetFor(botId);
+  set.clear();
+  rememberHomes(names, botId);
 }
 
 function collectSuggestPlayers(prefix) {
@@ -955,7 +1252,7 @@ function collectSuggestPlayers(prefix) {
 
 function collectSuggestHomes(prefix) {
   const pfx = String(prefix || "").toLowerCase();
-  return [...knownHomeNames]
+  return [...homesSetFor(selectedBotId)]
     .filter((n) => !pfx || n.toLowerCase().startsWith(pfx))
     .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
     .slice(0, 16);
@@ -1036,15 +1333,21 @@ function scheduleHomeTabComplete(value) {
   }, 120);
 }
 
-// Seed known homes once when the page loads / bot connects
-void (async () => {
+async function seedHomesForSelectedProfile() {
+  if (!selectedBotId) return;
   try {
     const res = await rpc("homes");
-    if (res?.ok && Array.isArray(res.data)) rememberHomes(res.data);
+    if (res?.ok && Array.isArray(res.data)) {
+      // Server list is authoritative for this profile
+      replaceHomes(res.data, selectedBotId);
+    }
   } catch {
     /* not connected yet */
   }
-})();
+}
+
+// Seed homes for the selected profile when the page loads
+void seedHomesForSelectedProfile();
 
 function bindSaySuggestions(inputId, listId) {
   const input = document.getElementById(inputId);
@@ -1166,7 +1469,6 @@ function bindSaySuggestions(inputId, listId) {
 }
 
 bindSaySuggestions("say-input", "say-suggest");
-bindSaySuggestions("say-input-map", "say-suggest-map");
 
 // Initial tab bar
 renderWireTabs();
@@ -1591,7 +1893,7 @@ function renderOpenWindow(win) {
     const label = itemLabel(item);
     if (label && label !== "item" && !/^minecraft:/.test(label)) homeNames.push(label);
   }
-  if (isHomes) rememberHomes(homeNames);
+  if (isHomes) replaceHomes(homeNames, selectedBotId);
 
   grid.replaceChildren();
   // Sort by slot so layout matches the chest order
@@ -1626,7 +1928,7 @@ function showHomesDialogPanel(title, homes) {
   const names = (Array.isArray(homes) ? homes : [])
     .map((h) => String(h || "").trim())
     .filter((h) => h && !/^(cancel|close|back|exit)$/i.test(h));
-  rememberHomes(names);
+  replaceHomes(names, selectedBotId);
   const card = document.getElementById("homes-window-card");
   const grid = document.getElementById("homes-window-grid");
   const titleEl = document.getElementById("homes-window-title");
@@ -1672,11 +1974,11 @@ function showHomesDialogPanel(title, homes) {
 async function showHomesFallbackPanel() {
   try {
     const res = await rpc("homes");
-    if (res.ok && Array.isArray(res.data)) rememberHomes(res.data);
+    if (res.ok && Array.isArray(res.data)) replaceHomes(res.data, selectedBotId);
   } catch {
     /* ignore */
   }
-  const names = [...knownHomeNames].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  const names = [...homesSetFor(selectedBotId)].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   showHomesDialogPanel("Homes", names);
   const hintEl = document.getElementById("homes-window-hint");
   if (hintEl && names.length) hintEl.textContent = "click a home to run /home (from known list)";
@@ -1955,19 +2257,20 @@ function connectEvents() {
       push("sys", `phase ${phaseVal}`);
     }
     if (msg.event === "chat") {
-      if (!isActiveBotEvent(msg.data)) return;
+      const chatBotId = eventBotId(msg.data) || selectedBotId || "";
+      // Always store on the owning profile's wire (even when another profile is selected)
       const raw = msg.data?.raw ?? (typeof msg.data === "string" ? msg.data : "");
       if (!raw) return;
-      lastSeenChat = raw;
-      push("", raw);
+      if (isActiveBotEvent(msg.data)) lastSeenChat = raw;
+      push("", raw, undefined, chatBotId);
       // Learn home names from chat lines so /home suggestions work without server tab-complete
       const hm = String(raw).match(/\bhomes?\s*(?:\([^)]*\))?\s*[:\-–]\s*(.+)$/i);
       if (hm?.[1]) {
         const parts = hm[1].split(/[,|;]+/).map((s) => s.trim().replace(/^['"]+|['"]+$/g, "").split(/\s+/)[0]);
-        rememberHomes(parts.filter((n) => n && /^[A-Za-z0-9_]{1,32}$/.test(n)));
+        rememberHomes(parts.filter((n) => n && /^[A-Za-z0-9_]{1,32}$/.test(n)), chatBotId);
       }
       const setm = String(raw).match(/\b(?:home\s+set|set\s+home)[:\s]+['"]?([A-Za-z0-9_]{1,32})/i);
-      if (setm?.[1]) rememberHomes([setm[1]]);
+      if (setm?.[1]) rememberHomes([setm[1]], chatBotId);
     }
     if (msg.event === "window") {
       if (!isActiveBotEvent(msg.data) && msg.data?.botId) {
@@ -1976,14 +2279,19 @@ function connectEvents() {
       const inv = msg.data?.inventory;
       if (inv) {
         renderInventory(inv);
-        if (Array.isArray(inv.homes)) rememberHomes(inv.homes);
+        const wid = eventBotId(msg.data) || selectedBotId;
+        if (Array.isArray(inv.homes)) replaceHomes(inv.homes, wid);
         if (inv.homesDialog?.homes?.length) {
-          showHomesDialogPanel(inv.homesDialog.title || "Homes", inv.homesDialog.homes);
+          replaceHomes(inv.homesDialog.homes, wid);
+          if (!wid || wid === selectedBotId) {
+            showHomesDialogPanel(inv.homesDialog.title || "Homes", inv.homesDialog.homes);
+          }
         }
       }
       if (msg.data?.kind === "homesDialog" && Array.isArray(msg.data.homes)) {
-        rememberHomes(msg.data.homes);
-        showHomesDialogPanel(msg.data.title || "Homes", msg.data.homes);
+        const hid = eventBotId(msg.data) || selectedBotId;
+        replaceHomes(msg.data.homes, hid);
+        if (!hid || hid === selectedBotId) showHomesDialogPanel(msg.data.title || "Homes", msg.data.homes);
       }
       if (msg.data?.open === false) {
         const card = document.getElementById("homes-window-card");
@@ -2071,9 +2379,54 @@ async function sendControl() {
   const packed = JSON.stringify(keys);
   if (packed === lastControl) return;
   lastControl = packed;
-  await syncBotLookToView();
+  const anyMove = keys.forward || keys.back || keys.left || keys.right;
+  if (anyMove) await syncBotLookToView();
   await rpc("control", { state: keys });
+  // Full stop when nothing is held (also clears pathfinder goals if stuck)
+  if (!Object.values(keys).some(Boolean)) {
+    try {
+      await rpc("stop", {});
+    } catch {
+      /* ignore */
+    }
+  }
 }
+
+/** Release every held movement/look control (focus loss, tab hide, safety). */
+function releaseAllControls(reason) {
+  let changed = false;
+  for (const k of Object.keys(keys)) {
+    if (keys[k]) {
+      keys[k] = false;
+      changed = true;
+    }
+  }
+  document.querySelectorAll("#gamepad [data-k].down, #gamepad [data-turn].down").forEach((el) => {
+    el.classList.remove("down");
+  });
+  // Stop continuous look intervals if any stuck
+  try {
+    window.__fractalClearLookTimers?.();
+  } catch {
+    /* ignore */
+  }
+  try {
+    window.fractalSurvey?.clearLookPrediction?.();
+  } catch {
+    /* ignore */
+  }
+  window.__fractalControlsActive = false;
+  if (changed || reason) {
+    lastControl = "";
+    void sendControl();
+  }
+}
+
+window.addEventListener("blur", () => releaseAllControls("blur"));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) releaseAllControls("hidden");
+});
+window.addEventListener("pagehide", () => releaseAllControls("pagehide"));
 
 
 /* On-screen gamepad (under 3D view) — hold movement mods, press actions */
@@ -2179,6 +2532,11 @@ window.__fractalControlsActive = false;
   // Look — hold to keep turning (faster ticks + local prediction for smooth feel)
   const lookTimers = new Map();
   const LOOK_INTERVAL_MS = 45;
+  window.__fractalClearLookTimers = () => {
+    for (const id of lookTimers.values()) clearInterval(id);
+    lookTimers.clear();
+    activeLookCount = 0;
+  };
   document.querySelectorAll("#gamepad [data-turn]").forEach((el) => {
     const raw = el.getAttribute("data-turn") || "0,0";
     const [yawS, pitchS] = raw.split(",");
@@ -2710,6 +3068,25 @@ document.getElementById("detect-clear")?.addEventListener("click", () => {
   void rpc("clearDetection", {}).catch(() => {});
 });
 
+/** Keep fixed top bar from covering page content (height can change with vitals wrap). */
+function syncTopStickyHeight() {
+  const bar = document.getElementById("top-sticky");
+  if (!bar) return;
+  const h = Math.ceil(bar.getBoundingClientRect().height);
+  document.documentElement.style.setProperty("--top-sticky-h", `${h}px`);
+}
+function initTopStickyHeight() {
+  syncTopStickyHeight();
+  const bar = document.getElementById("top-sticky");
+  if (bar && typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => syncTopStickyHeight());
+    ro.observe(bar);
+  }
+  window.addEventListener("resize", () => syncTopStickyHeight(), { passive: true });
+  window.addEventListener("orientationchange", () => setTimeout(syncTopStickyHeight, 150));
+}
+initTopStickyHeight();
+
 connectEvents();
 void refresh({ force: true });
 applyView3dState();
@@ -2747,14 +3124,15 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) void refresh({ force: true });
 });
 
-// 3D on/off lives on the survey toolbar (not Settings)
-document.getElementById("survey-3d-on")?.addEventListener("click", () => {
-  setView3dPref(true);
-  void refreshVoxels();
-});
-document.getElementById("survey-3d-off")?.addEventListener("click", () => {
-  setView3dPref(false);
-});
+// 3D on/off — toolbar + always-visible section head (works while collapsed)
+function bindView3dToggle(id, on) {
+  document.getElementById(id)?.addEventListener("click", () => {
+    setView3dPref(on);
+    if (on) void refreshVoxels();
+  });
+}
+bindView3dToggle("survey-3d-on", true);
+bindView3dToggle("survey-3d-off", false);
 
 // 3D quality (lite / full) — same toolbar
 document.getElementById("view3d-quality-lite")?.addEventListener("click", () => {
@@ -2771,6 +3149,112 @@ document.getElementById("view3d-quality-full")?.addEventListener("click", () => 
   if (liteBtn) liteBtn.classList.toggle("on", q === "lite");
   if (fullBtn) fullBtn.classList.toggle("on", q === "full");
 })();
+
+/* —— Chat on/off (hide log + input completely; keep section head) —— */
+const CHAT_PREF_KEY = "fractal.chatEnabled";
+
+function isChatPrefEnabled() {
+  try {
+    const v = localStorage.getItem(CHAT_PREF_KEY);
+    if (v === null) return true;
+    return v === "1" || v === "true";
+  } catch {
+    return true;
+  }
+}
+
+function applyChatPref() {
+  const on = isChatPrefEnabled();
+  for (const block of document.querySelectorAll(".wire-block")) {
+    block.classList.toggle("chat-off", !on);
+  }
+  const onBtn = document.getElementById("chat-on");
+  const offBtn = document.getElementById("chat-off");
+  if (onBtn) onBtn.classList.toggle("on", on);
+  if (offBtn) offBtn.classList.toggle("on", !on);
+}
+
+function setChatPref(on) {
+  try {
+    localStorage.setItem(CHAT_PREF_KEY, on ? "1" : "0");
+  } catch {
+    /* private mode */
+  }
+  applyChatPref();
+}
+
+document.getElementById("chat-on")?.addEventListener("click", () => setChatPref(true));
+document.getElementById("chat-off")?.addEventListener("click", () => setChatPref(false));
+applyChatPref();
+
+/* —— Independent collapse per home section (persisted) —— */
+const COLLAPSE_PREF_KEY = "fractal.sectionCollapse";
+
+function loadCollapseMap() {
+  try {
+    const raw = localStorage.getItem(COLLAPSE_PREF_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCollapseMap(map) {
+  try {
+    localStorage.setItem(COLLAPSE_PREF_KEY, JSON.stringify(map));
+  } catch {
+    /* ignore */
+  }
+}
+
+function setSectionCollapsed(block, collapsed) {
+  block.classList.toggle("is-collapsed", collapsed);
+  const btn = block.querySelector(":scope > .collapse-head > .collapse-toggle");
+  if (btn) {
+    btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    btn.title = collapsed ? "Expand section" : "Collapse section";
+  }
+}
+
+function initCollapsibleSections() {
+  const map = loadCollapseMap();
+  for (const block of document.querySelectorAll(".collapsible[data-collapse-key]")) {
+    const key = block.getAttribute("data-collapse-key");
+    if (!key) continue;
+    if (map[key]) setSectionCollapsed(block, true);
+    const head = block.querySelector(":scope > .collapse-head");
+    const toggle = head?.querySelector?.(".collapse-toggle");
+    if (!toggle || toggle.dataset.bound) continue;
+    toggle.dataset.bound = "1";
+    const onToggle = (e) => {
+      // Don't collapse when clicking module toggles / close buttons inside the head
+      if (e.target.closest(".module-toggle-row, .btn-quiet, a, input, select, label")) return;
+      if (e.target !== toggle && !toggle.contains(e.target) && e.currentTarget === head) {
+        // Allow clicking the head row (except interactive controls) to toggle
+      }
+      const next = !block.classList.contains("is-collapsed");
+      setSectionCollapsed(block, next);
+      const m = loadCollapseMap();
+      if (next) m[key] = true;
+      else delete m[key];
+      saveCollapseMap(m);
+    };
+    toggle.addEventListener("click", (e) => {
+      e.stopPropagation();
+      onToggle(e);
+    });
+    head?.addEventListener("click", (e) => {
+      if (e.target.closest(".module-toggle-row, .btn-quiet, a, input, select, label, button:not(.collapse-toggle)")) {
+        return;
+      }
+      if (e.target === toggle || toggle.contains(e.target)) return;
+      onToggle(e);
+    });
+  }
+}
+initCollapsibleSections();
 
 // Notifications + service worker (captcha alerts on phone / background tab)
 updateNotifyChip();
@@ -2801,7 +3285,7 @@ function openTabSettings(kind) {
   if (!overlay) return;
   const title = document.getElementById("tab-settings-title");
   const titles = {
-    play: "Play settings",
+    play: "Connection settings",
     map: "Map settings",
     announce: "Announce settings",
     detect: "Detection settings",
@@ -2870,7 +3354,9 @@ async function loadSettingsForm(attempt = 0) {
   if (pathEl) pathEl.textContent = storePath || folder || "Settings/settings.json";
   form.replaceChildren();
   const groups = new Map();
+  // Defaults (MC_HOST/MC_HOSTS/MC_PORT/MC_VERSION) live under Connection — skip here to avoid duplicates
   for (const f of fields || []) {
+    if (f.group === "Defaults") continue;
     if (!groups.has(f.group)) groups.set(f.group, []);
     groups.get(f.group).push(f);
   }
@@ -3012,6 +3498,8 @@ function renderProfileDropdown() {
   const bots = fleetState?.bots || [];
   if (empty) empty.hidden = bots.length > 0;
   for (const b of bots) {
+    const row = document.createElement("div");
+    row.className = "pd-row" + (b.id === selectedBotId ? " active" : "");
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "pd-item" + (b.id === selectedBotId ? " active" : "");
@@ -3026,7 +3514,16 @@ function renderProfileDropdown() {
         <span class="pd-name">${escapeHtml(b.label || b.username)}</span>
         <span class="pd-sub">${escapeHtml(b.username)} · ${escapeHtml(phase)}</span>
       </span>`;
-    list.append(btn);
+    const open = document.createElement("a");
+    open.className = "pd-open-tab";
+    open.href = profileTabUrl(b.id);
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    open.title = "Open this profile in a new tab";
+    open.textContent = "↗";
+    open.addEventListener("click", (e) => e.stopPropagation());
+    row.append(btn, open);
+    list.append(row);
   }
 }
 
@@ -3052,21 +3549,27 @@ function toggleProfileDropdown() {
   else closeProfileDropdown();
 }
 
-function setSelectedBot(id) {
+function setSelectedBot(id, opts = {}) {
   selectedBotId = id || "";
-  if (id) {
-    try {
-      localStorage.setItem("fractal-bot-id", id);
-    } catch {
-      /* ignore */
-    }
+  try {
+    if (id) sessionStorage.setItem("fractal-bot-id", id);
+    else sessionStorage.removeItem("fractal-bot-id");
+  } catch {
+    /* ignore */
   }
+  if (opts.updateUrl !== false) writeProfileIdToUrl(id);
   const bot = (fleetState?.bots || []).find((b) => b.id === id) || null;
   renderFleet();
   fillProfileEditor(bot, true);
   fillTasksForm(bot);
   updateProfileSelectorUI();
   renderProfileDropdown();
+  // Chat/wire is per profile — show this profile's log and tabs
+  hideTpaBanner();
+  renderWireTabs();
+  renderActiveWireLog();
+  // Reload this profile's homes for /home autocomplete (never mix accounts)
+  void seedHomesForSelectedProfile();
   // Instantly refresh status/data for the new profile context
   void refresh();
 }
@@ -3076,6 +3579,11 @@ async function refreshFleet() {
   if (body.ok && body.data) {
     fleetState = body.data;
     if (!selectedBotId && body.data.bots?.length) {
+      const fromUrl = readProfileIdFromUrl();
+      if (fromUrl && body.data.bots.some((b) => b.id === fromUrl)) {
+        setSelectedBot(fromUrl, { updateUrl: false });
+        return;
+      }
       const running = body.data.bots.find((b) => b.running);
       setSelectedBot((running || body.data.bots[0]).id);
       return;
@@ -3085,6 +3593,9 @@ async function refreshFleet() {
       const next = body.data.bots?.[0];
       setSelectedBot(next ? next.id : "");
       return;
+    }
+    if (selectedBotId && !readProfileIdFromUrl()) {
+      writeProfileIdToUrl(selectedBotId);
     }
     renderFleet();
     updateProfileSelectorUI();
@@ -3143,6 +3654,7 @@ function renderFleet() {
       <div class="profile-card-actions">
         <button type="button" data-start="${b.id}" ${noPw ? "title=\"Set a password before starting\"" : ""}>Start</button>
         <button type="button" data-stop="${b.id}">Stop</button>
+        <a class="profile-open-tab" href="${profileTabUrl(b.id)}" target="_blank" rel="noopener noreferrer" title="Open in new tab">↗</a>
       </div>`;
     grid.append(card);
   }
@@ -3874,24 +4386,28 @@ function activateTab(name) {
   }
   closeSidebar();
   placeSurveyMount(tabName);
-  if (tabName === "map" || tabName === "play") {
+  if (tabName === "play") {
     requestAnimationFrame(() => window.fractalSurvey?.resize?.());
   }
   if (tabName === "detect") void refreshDetection();
+  if (tabName === "settings") {
+    void loadSettingsForm(0);
+    const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
+    fillConnectionSettingsForm(bot);
+  }
   renderSideNav(document.getElementById("sidebar-search")?.value || "");
 }
 
+/** 3D survey lives only on the Play (home) module. */
 function placeSurveyMount(tabName) {
   const shared = document.getElementById("survey-shared");
   if (!shared) return;
   const playMount = document.getElementById("survey-mount-play");
-  const mapMount = document.getElementById("survey-mount-map");
-  shared.hidden = false;
-  if (tabName === "map" && mapMount) {
-    mapMount.appendChild(shared);
-  } else if (playMount) {
+  if (playMount) {
     playMount.appendChild(shared);
+    shared.hidden = false;
   }
+  void tabName;
 }
 
 function filterModuleList(query) {
@@ -4014,16 +4530,7 @@ if (hashTab === "fleet" || legacy[hashTab] === "fleet") {
 }
 
 
-/* dual wire + goto on map tab */
-document.getElementById("say-map")?.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const input = document.getElementById("say-input-map");
-  const textVal = (input?.value || "").trim();
-  if (!textVal) return;
-  input.value = "";
-  await sendWireMessage(textVal);
-});
-
+/* goto on map tab (chat lives only on Play) */
 document.getElementById("goto-map")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const fd = new FormData(e.target);
@@ -4039,7 +4546,220 @@ document.getElementById("goto-map")?.addEventListener("submit", async (e) => {
 
 
 /* —— Per-profile settings (Settings/Profiles/<id>.json) —— */
+/** Load process-wide connection defaults (MC_HOST/…) into the Connection form. */
+async function fillConnectionDefaultsFromProcess() {
+  const form = document.getElementById("connection-settings-form");
+  if (!form) return;
+  try {
+    const body = await rpc("getSettings", {});
+    if (!body.ok || !body.data?.fields) return;
+    const byKey = new Map((body.data.fields || []).map((f) => [f.key, f]));
+    for (const key of ["MC_HOST", "MC_HOSTS", "MC_PORT", "MC_VERSION"]) {
+      const el = form.elements?.namedItem?.(key) || form.querySelector(`[name="${key}"]`);
+      if (!el || !("value" in el)) continue;
+      const f = byKey.get(key);
+      el.value = f?.value != null ? String(f.value) : "";
+    }
+  } catch {
+    /* ignore — process API may be down */
+  }
+}
+
+function fillConnectionSettingsForm(bot) {
+  const form = document.getElementById("connection-settings-form");
+  const pathEl = document.getElementById("connection-settings-path");
+  const hint = document.getElementById("connection-profile-hint");
+  if (!form) return;
+  void fillConnectionDefaultsFromProcess();
+  if (!bot) {
+    if (pathEl) pathEl.textContent = "Process defaults · select a profile for per-account overrides";
+    if (hint) hint.textContent = "Select a profile in the top bar for profile overrides";
+    for (const name of [
+      "host",
+      "port",
+      "version",
+      "viewDistance",
+      "requiredServerPortals",
+      "portalRetryMs",
+      "reconnectMs",
+      "reconnectMaxMs",
+      "rateLimitCooldownMs",
+      "captchaCooldownMs",
+    ]) {
+      const el = form.elements?.namedItem?.(name) || form.querySelector(`[name="${name}"]`);
+      if (el && "value" in el) el.value = "";
+    }
+    return;
+  }
+  const fileStem = String(bot.label || bot.username || bot.id || "profile")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64) || "profile";
+  if (pathEl) {
+    pathEl.textContent = `Defaults (process) · Profile ${bot.label || bot.username} · Settings/Profiles/${fileStem}.json`;
+  }
+  if (hint) hint.textContent = `Overrides for ${bot.label || bot.username} (blank host/port/version = use process default)`;
+  const p = bot.profile || {};
+  if (form.host) form.host.value = bot.host || "";
+  if (form.port) form.port.value = bot.port != null ? bot.port : "";
+  if (form.version) form.version.value = p.version || "";
+  if (form.viewDistance) form.viewDistance.value = p.viewDistance ?? "";
+  if (form.autoLobby) form.autoLobby.value = p.autoLobby === false ? "false" : "true";
+  if (form.autoReconnect) form.autoReconnect.value = p.autoReconnect === false ? "false" : "true";
+  if (form.requiredServerPortals) form.requiredServerPortals.value = p.requiredServerPortals ?? "";
+  if (form.portalRetryMs) form.portalRetryMs.value = p.portalRetryMs ?? "";
+  if (form.reconnectMs) form.reconnectMs.value = p.reconnectMs ?? "";
+  if (form.reconnectMaxMs) form.reconnectMaxMs.value = p.reconnectMaxMs ?? "";
+  if (form.rateLimitCooldownMs) form.rateLimitCooldownMs.value = p.rateLimitCooldownMs ?? "";
+  if (form.captchaCooldownMs) form.captchaCooldownMs.value = p.captchaCooldownMs ?? "";
+}
+
+async function saveConnectionSettings() {
+  const form = document.getElementById("connection-settings-form");
+  const msg = document.getElementById("settings-msg-connection");
+  if (!form) return;
+  const num = (v) => (v === "" || v == null ? undefined : Number(v));
+  const boolSel = (v) => (v === "true" ? true : v === "false" ? false : undefined);
+
+  // Always save process-wide defaults (no profile required)
+  const defaultValues = {
+    MC_HOST: form.MC_HOST?.value ?? form.querySelector('[name="MC_HOST"]')?.value ?? "",
+    MC_HOSTS: form.MC_HOSTS?.value ?? form.querySelector('[name="MC_HOSTS"]')?.value ?? "",
+    MC_PORT: form.MC_PORT?.value ?? form.querySelector('[name="MC_PORT"]')?.value ?? "",
+    MC_VERSION: form.MC_VERSION?.value ?? form.querySelector('[name="MC_VERSION"]')?.value ?? "",
+  };
+  const defaultsBody = await rpc("saveSettings", { values: defaultValues }).catch((err) => ({
+    ok: false,
+    error: err instanceof Error ? err.message : String(err),
+  }));
+  if (!defaultsBody.ok) {
+    if (msg) {
+      msg.hidden = false;
+      msg.textContent = defaultsBody.error || "Failed to save process defaults";
+      msg.className = "settings-msg err";
+    }
+    return;
+  }
+
+  // Profile overrides when a profile is selected
+  if (!selectedBotId) {
+    if (msg) {
+      msg.hidden = false;
+      msg.textContent = "Process defaults saved · select a profile to also save profile overrides";
+      msg.className = "settings-msg ok";
+    }
+    void fillConnectionDefaultsFromProcess();
+    return;
+  }
+  const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
+  if (!bot?.username) {
+    if (msg) {
+      msg.hidden = false;
+      msg.textContent = "Process defaults saved · profile not found for overrides";
+      msg.className = "settings-msg ok";
+    }
+    return;
+  }
+  const account = {
+    id: selectedBotId,
+    username: bot.username,
+    host: form.host?.value?.trim() || undefined,
+    port: num(form.port?.value),
+    profile: {
+      autoLobby: boolSel(form.autoLobby?.value),
+      autoReconnect: boolSel(form.autoReconnect?.value),
+      requiredServerPortals: num(form.requiredServerPortals?.value),
+      portalRetryMs: num(form.portalRetryMs?.value),
+      reconnectMs: num(form.reconnectMs?.value),
+      reconnectMaxMs: num(form.reconnectMaxMs?.value),
+      rateLimitCooldownMs: num(form.rateLimitCooldownMs?.value),
+      captchaCooldownMs: num(form.captchaCooldownMs?.value),
+      viewDistance: num(form.viewDistance?.value),
+      version: form.version?.value?.trim() || undefined,
+    },
+  };
+  const body = await rpc("fleetAddAccount", { account });
+  if (msg) {
+    msg.hidden = false;
+    if (body.ok) {
+      msg.textContent = "Connection saved (process defaults + profile)";
+      msg.className = "settings-msg ok";
+      await rpc("set", {
+        autoLobby: account.profile.autoLobby,
+        autoReconnect: account.profile.autoReconnect,
+      }).catch(() => {});
+    } else {
+      msg.textContent = body.error || "Profile save failed (defaults were saved)";
+      msg.className = "settings-msg err";
+    }
+  }
+  await refreshFleet();
+  const next = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
+  fillConnectionSettingsForm(next);
+  fillProfileSettingsForm(next);
+}
+
+function syncDetectListenerUi(bot) {
+  const onEl = document.getElementById("toggle-server-listener");
+  const outEl = document.getElementById("toggle-server-listener-out");
+  if (!onEl && !outEl) return;
+  const p = bot?.profile || {};
+  const on = p.serverListener === true;
+  const out = p.serverListenerOutbound !== false;
+  if (onEl && onEl.dataset.userTouched !== "1") {
+    onEl.checked = on;
+    onEl.closest(".task-toggle")?.classList.toggle("on", on);
+  }
+  if (outEl && outEl.dataset.userTouched !== "1") {
+    outEl.checked = out;
+    outEl.closest(".task-toggle")?.classList.toggle("on", out);
+  }
+}
+
+async function saveDetectListenerFlags() {
+  if (!selectedBotId) {
+    push("err", "Select a profile first");
+    return;
+  }
+  const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
+  if (!bot?.username) {
+    push("err", "Profile not found");
+    return;
+  }
+  const onEl = document.getElementById("toggle-server-listener");
+  const outEl = document.getElementById("toggle-server-listener-out");
+  const serverListener = !!onEl?.checked;
+  const serverListenerOutbound = outEl ? !!outEl.checked : true;
+  onEl?.closest(".task-toggle")?.classList.toggle("on", serverListener);
+  outEl?.closest(".task-toggle")?.classList.toggle("on", serverListenerOutbound);
+  const account = {
+    id: selectedBotId,
+    username: bot.username,
+    profile: {
+      serverListener,
+      serverListenerOutbound,
+    },
+  };
+  const body = await rpc("fleetAddAccount", { account }).catch((err) => ({
+    ok: false,
+    error: err instanceof Error ? err.message : String(err),
+  }));
+  if (!body.ok) {
+    push("err", body.error || "Failed to save packet listener");
+    return;
+  }
+  push("sys", serverListener ? "Packet listener on" : "Packet listener off");
+  await refreshFleet();
+  const next = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
+  if (onEl) delete onEl.dataset.userTouched;
+  if (outEl) delete outEl.dataset.userTouched;
+  syncDetectListenerUi(next);
+}
+
 function fillProfileSettingsForm(bot) {
+  fillConnectionSettingsForm(bot);
+  syncDetectListenerUi(bot);
   const form = document.getElementById("profile-settings-form");
   const pathEl = document.getElementById("tab-settings-path");
   if (!form) return;
@@ -4059,36 +4779,25 @@ function fillProfileSettingsForm(bot) {
     if (pathEl) pathEl.textContent = `Profile · ${bot.label || bot.username} · Settings/Profiles/${fileStem}.json`;
   }
   const p = bot.profile || {};
-  form.autoLobby.value = p.autoLobby === false ? "false" : "true";
-  form.autoReconnect.value = p.autoReconnect === false ? "false" : "true";
-  form.requiredServerPortals.value = p.requiredServerPortals ?? "";
-  form.portalRetryMs.value = p.portalRetryMs ?? "";
-  form.reconnectMs.value = p.reconnectMs ?? "";
-  form.reconnectMaxMs.value = p.reconnectMaxMs ?? "";
-  form.rateLimitCooldownMs.value = p.rateLimitCooldownMs ?? "";
-  form.captchaCooldownMs.value = p.captchaCooldownMs ?? "";
-  form.viewDistance.value = p.viewDistance ?? "";
-  if (form.version) form.version.value = p.version || "";
-  form.mapOutputDir.value = p.mapOutputDir || "./output";
-  form.mapHomeName.value = p.mapHomeName || "spawn";
-  // Always pick a visible option (empty string leaves the select blank on mobile)
-  form.mapMode.value = p.mapMode || "box";
-  form.mapAutoStart.value = p.mapAutoStart === true ? "true" : "false";
-  form.mapBoxX1.value = p.mapBox?.x1 ?? "20000";
-  form.mapBoxZ1.value = p.mapBox?.z1 ?? "20000";
-  form.mapBoxX2.value = p.mapBox?.x2 ?? "24000";
-  form.mapBoxZ2.value = p.mapBox?.z2 ?? "24000";
-  form.host.value = bot.host || "";
-  form.port.value = bot.port != null ? bot.port : "";
+  // Module fields only (connection lives under top-bar Settings)
+  if (form.mapOutputDir) form.mapOutputDir.value = p.mapOutputDir || "./output";
+  if (form.mapHomeName) form.mapHomeName.value = p.mapHomeName || "spawn";
+  if (form.mapMode) form.mapMode.value = p.mapMode || "box";
+  if (form.mapAutoStart) form.mapAutoStart.value = p.mapAutoStart === true ? "true" : "false";
+  if (form.mapBoxX1) form.mapBoxX1.value = p.mapBox?.x1 ?? "20000";
+  if (form.mapBoxZ1) form.mapBoxZ1.value = p.mapBox?.z1 ?? "20000";
+  if (form.mapBoxX2) form.mapBoxX2.value = p.mapBox?.x2 ?? "24000";
+  if (form.mapBoxZ2) form.mapBoxZ2.value = p.mapBox?.z2 ?? "24000";
   // Detection
   if (form.detectionRecheckMs) form.detectionRecheckMs.value = p.detectionRecheckMs ?? "3000";
+  if (form.detectionPlayerLeaveGraceMs)
+    form.detectionPlayerLeaveGraceMs.value = p.detectionPlayerLeaveGraceMs ?? "60000";
   if (form.detectionPlayers) form.detectionPlayers.value = p.detectionPlayers === false ? "false" : "true";
   if (form.detectionCrystals) form.detectionCrystals.value = p.detectionCrystals === false ? "false" : "true";
   if (form.detectionTnt) form.detectionTnt.value = p.detectionTnt === false ? "false" : "true";
   if (form.detectionExplosions) form.detectionExplosions.value = p.detectionExplosions === false ? "false" : "true";
   if (form.detectionCombat) form.detectionCombat.value = p.detectionCombat === false ? "false" : "true";
-  if (form.serverListener) form.serverListener.value = p.serverListener === true ? "true" : "false";
-  if (form.serverListenerOutbound) form.serverListenerOutbound.value = p.serverListenerOutbound === false ? "false" : "true";
+  // serverListener toggles live on Detect tab (syncDetectListenerUi)
   if (form.antiAfkIntervalMs) form.antiAfkIntervalMs.value = p.antiAfkIntervalMs ?? "60000";
   fillDetNotifyForm(form, bot);
 }
@@ -4128,32 +4837,19 @@ async function saveProfileSettings() {
   const account = {
     id: selectedBotId,
     username: (fleetState?.bots || []).find((b) => b.id === selectedBotId)?.username,
-    host: form.host.value.trim() || undefined,
-    port: num(form.port.value),
     profile: {
-      autoLobby: boolSel(form.autoLobby.value),
-      autoReconnect: boolSel(form.autoReconnect.value),
-      requiredServerPortals: num(form.requiredServerPortals.value),
-      portalRetryMs: num(form.portalRetryMs.value),
-      reconnectMs: num(form.reconnectMs.value),
-      reconnectMaxMs: num(form.reconnectMaxMs.value),
-      rateLimitCooldownMs: num(form.rateLimitCooldownMs.value),
-      captchaCooldownMs: num(form.captchaCooldownMs.value),
-      viewDistance: num(form.viewDistance.value),
-      version: form.version?.value?.trim() || undefined,
-      mapOutputDir: form.mapOutputDir.value.trim() || undefined,
-      mapHomeName: form.mapHomeName.value.trim() || undefined,
-      mapMode: form.mapMode.value.trim() || undefined,
-      mapAutoStart: boolSel(form.mapAutoStart.value),
+      mapOutputDir: form.mapOutputDir?.value?.trim() || undefined,
+      mapHomeName: form.mapHomeName?.value?.trim() || undefined,
+      mapMode: form.mapMode?.value?.trim() || undefined,
+      mapAutoStart: boolSel(form.mapAutoStart?.value),
       mapBox,
       detectionRecheckMs: num(form.detectionRecheckMs?.value),
+      detectionPlayerLeaveGraceMs: num(form.detectionPlayerLeaveGraceMs?.value),
       detectionPlayers: boolSel(form.detectionPlayers?.value),
       detectionCrystals: boolSel(form.detectionCrystals?.value),
       detectionTnt: boolSel(form.detectionTnt?.value),
       detectionExplosions: boolSel(form.detectionExplosions?.value),
       detectionCombat: boolSel(form.detectionCombat?.value),
-      serverListener: boolSel(form.serverListener?.value) === true,
-      serverListenerOutbound: boolSel(form.serverListenerOutbound?.value) !== false,
       antiAfkIntervalMs: num(form.antiAfkIntervalMs?.value),
       notifyPrefs,
     },
@@ -4173,11 +4869,6 @@ async function saveProfileSettings() {
       msg.textContent = "Saved for this profile only · listener & bot settings applied to this account";
       msg.className = "settings-msg ok";
       closeTabSettings();
-      // Apply live flags only on the selected bot (RPC set targets selected bot)
-      await rpc("set", {
-        autoLobby: account.profile.autoLobby,
-        autoReconnect: account.profile.autoReconnect,
-      }).catch(() => {});
     } else {
       msg.textContent = body.error || "Save failed";
       msg.className = "settings-msg err";
@@ -4189,6 +4880,49 @@ async function saveProfileSettings() {
 }
 
 document.getElementById("settings-save")?.addEventListener("click", () => void saveProfileSettings());
+
+
+document.getElementById("toggle-server-listener")?.addEventListener("change", (e) => {
+  e.target.dataset.userTouched = "1";
+  void saveDetectListenerFlags();
+});
+document.getElementById("toggle-server-listener-out")?.addEventListener("change", (e) => {
+  e.target.dataset.userTouched = "1";
+  void saveDetectListenerFlags();
+});
+document.getElementById("clear-server-listener")?.addEventListener("click", async () => {
+  const msg = document.getElementById("settings-msg");
+  if (!selectedBotId) {
+    if (msg) {
+      msg.hidden = false;
+      msg.textContent = "Select a profile first to clear its listener log";
+      msg.className = "settings-msg err";
+    }
+    push("err", "Select a profile first");
+    return;
+  }
+  const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
+  const username = bot?.username || "";
+  const body = await rpc("clearServerListener", { username }).catch((err) => ({
+    ok: false,
+    error: err instanceof Error ? err.message : String(err),
+  }));
+  if (msg) {
+    msg.hidden = false;
+    if (body.ok) {
+      const path = body.data?.path || body.data?.cleared?.[0] || "listener log";
+      msg.textContent = `Listener log cleared · ${path}`;
+      msg.className = "settings-msg ok";
+      push("sys", `Cleared packet listener log for ${username || "profile"}`);
+    } else {
+      msg.textContent = body.error || "Clear failed";
+      msg.className = "settings-msg err";
+      push("err", body.error || "Clear listener failed");
+    }
+  }
+});
+
+document.getElementById("settings-save-connection")?.addEventListener("click", () => void saveConnectionSettings());
 
 // Hook fillProfileSettings into setSelectedBot / renderFleet
 const _origSetSelectedBot = setSelectedBot;

@@ -158,6 +158,8 @@ export class FleetManager extends EventEmitter {
       requiredServerPortals: p.requiredServerPortals ?? this.baseConfig.requiredServerPortals,
       portalRetryMs: p.portalRetryMs ?? this.baseConfig.portalRetryMs,
       detectionRecheckMs: p.detectionRecheckMs ?? this.baseConfig.detectionRecheckMs,
+      detectionPlayerLeaveGraceMs:
+        p.detectionPlayerLeaveGraceMs ?? this.baseConfig.detectionPlayerLeaveGraceMs,
       detectionPlayers: p.detectionPlayers ?? this.baseConfig.detectionPlayers,
       detectionCrystals: p.detectionCrystals ?? this.baseConfig.detectionCrystals,
       detectionTnt: p.detectionTnt ?? this.baseConfig.detectionTnt,

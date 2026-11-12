@@ -479,6 +479,36 @@ async function dispatch(fleet: FleetManager, request?: ControlRequest): Promise<
       case "clearDetection":
         bot.clearDetectionLog();
         return { ok: true, data: bot.getDetection() };
+      case "clearServerListener": {
+        const { clearServerListenerLog, defaultServerListenerPath } = await import(
+          "../minecraft/serverListener.ts"
+        );
+        const { settingsDir } = await import("../settings/store.ts");
+        const username =
+          String((request as { username?: unknown }).username || "").trim() ||
+          bot.getStatus()?.username ||
+          "";
+        const folder = settingsDir();
+        const result = await clearServerListenerLog(username || undefined, folder);
+        // If still empty (bot offline / never attached), clear default path for username
+        if (result.cleared.length === 0 && username) {
+          const fallback = await clearServerListenerLog(username, folder);
+          return {
+            ok: true,
+            data: {
+              ...fallback,
+              path: fallback.cleared[0] || defaultServerListenerPath(folder, username),
+            },
+          };
+        }
+        return {
+          ok: true,
+          data: {
+            ...result,
+            path: result.cleared[0] || defaultServerListenerPath(folder, username),
+          },
+        };
+      }
       case "entities":
         return { ok: true, data: bot.getEntities() };
       case "inventory":

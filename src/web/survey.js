@@ -1169,6 +1169,7 @@ void main() {
     const by = ly(bot.y);
     const bz = lz(bot.z);
     if (mode === "orbit" && !ownsKeys()) {
+      // Slow continuous orbit around the bot (camera only)
       orbitAngle += dt * 0.18;
       const dist = Math.max(12, radius * 0.7);
       eye = [bx + Math.cos(orbitAngle) * dist, by + 8, bz + Math.sin(orbitAngle) * dist];
