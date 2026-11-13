@@ -225,7 +225,7 @@ export function attachServerListener(bot: Bot, options: ServerListenerOptions & 
       "utf8",
     );
   } catch (err) {
-    log.warn("serverListener cannot open file", { filePath, err: err instanceof Error ? err.message : err });
+    log.warn("serverListener cannot open file", filePath, err instanceof Error ? err.message : err);
     return;
   }
 
@@ -436,7 +436,7 @@ export async function clearServerListenerLog(
       cleared.push(resolved);
       log.info(`Server packet listener log cleared → ${resolved}`);
     } catch (err) {
-      log.warn("serverListener clear failed", { resolved, err: err instanceof Error ? err.message : err });
+      log.warn("serverListener clear failed", resolved, err instanceof Error ? err.message : err);
     }
   };
 

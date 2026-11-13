@@ -25,17 +25,6 @@ import { dumpWorld, persistDump, topBlockCounts } from "../minecraft/probe.ts";
 import { findPortalBlocks } from "../minecraft/lobby/portals.ts";
 import { clampVoxelRadius, sampleVoxels, type VoxelQuality } from "../minecraft/voxels.ts";
 import { createMapperBridge, type MapperHost, type MapperStatus } from "../mapper/bridge.ts";
-import { HuntController, type HuntConfig, type HuntStatus } from "../hunt/controller.ts";
-import { HuntDatabase } from "../hunt/database.ts";
-import { NotificationCenter } from "../hunt/notifications.ts";
-import { equipBestElytra, readElytraStatus } from "../hunt/elytraRuntime.ts";
-import { readMendingCandidates, selectMendingTarget } from "../hunt/mendingRuntime.ts";
-import { readSurvivalSnapshot } from "../hunt/survivalRuntime.ts";
-import { findEnderChest, openEnderChest, readOpenContainer, closeEnderChest } from "../hunt/enderChestRuntime.ts";
-import { loadHuntConfig, saveHuntConfig } from "../settings/huntConfigStore.ts";
-import { KitBotController, type KitBotEvent, type KitBotStatus } from "../kitbot/controller.ts";
-import type { KitBotConfig } from "../kitbot/kit.ts";
-import { loadKitBotConfig, saveKitBotConfig } from "../settings/kitBotConfigStore.ts";
 
 // Install before any bot connects (chat packets can arrive immediately after login)
 try {
@@ -153,21 +142,6 @@ export class FractalBot extends EventEmitter {
   private lastParseSkipLoggedAt = 0;
   private healthyResetTimer: NodeJS.Timeout | null = null;
   private mapper: MapperHost;
-  /** Base-hunting controller (created lazily, lives as long as this bot). */
-  private hunt: HuntController | null = null;
-  private huntDb: HuntDatabase | null = null;
-  private notify: NotificationCenter | null = null;
-  private huntTick: NodeJS.Timeout | null = null;
-  /** Wall-clock of the last hunt tick, so the interval cannot pile up. */
-  private huntTickBusy = false;
-  /** Kit bot controller (created lazily, lives as long as this bot). */
-  private kitbot: KitBotController | null = null;
-  /** True while the kit bot should react to chat. */
-  private kitbotActive = false;
-  /** Most recent attacker, used to name a killer on death. */
-  private lastAttacker: { username: string; at: number } | null = null;
-  /** Last health value seen, so a drop can be attributed to an attacker. */
-  private lastHealthSeen = 20;
 
   constructor(private config: FractalConfig) {
     super();
@@ -286,8 +260,6 @@ export class FractalBot extends EventEmitter {
       autoLobby: this.autoLobby,
       huntingPortal: Boolean(this.navigator?.hunting),
       mapping: this.mapper.status(),
-      hunt: this.hunt?.status() ?? null,
-      kitBot: this.kitbot ? { ...this.kitbot.status(), active: this.kitbotActive } : null,
     };
   }
 
@@ -307,341 +279,6 @@ export class FractalBot extends EventEmitter {
 
   setMappingConfig(partial: Record<string, unknown>): void {
     this.mapper.setMappingConfig(partial);
-  }
-
-  // --- Base hunting -------------------------------------------------------------------------------
-
-  /**
-   * Lazily create the hunt controller and its per-server database. The database lives under
-   * `Settings/hunt/<server>/`, so records are keyed to the server the bot is pointed at.
-   */
-  private huntController(): HuntController {
-    if (this.hunt) return this.hunt;
-    const server = `${this.config.host}:${this.config.port}`;
-    this.huntDb = new HuntDatabase({ dir: settingsDir(), server, maxPlayerAgeDays: 90 });
-    this.hunt = new HuntController({
-      getBot: () => this.bot,
-      database: this.huntDb,
-      notifications: this.huntNotifications(),
-      server,
-      config: loadHuntConfig(server),
-    });
-    return this.hunt;
-  }
-
-  /** The hunt notification sink, shared by the controller and the direct runtime commands. */
-  private huntNotifications(): NotificationCenter {
-    if (!this.notify) {
-      this.notify = new NotificationCenter({
-        sink: (n) => {
-          log.info(`[hunt:${n.kind}] ${n.title} — ${n.body}`);
-          this.emit("huntNotification", n);
-        },
-      });
-    }
-    return this.notify;
-  }
-
-  /**
-   * Send a test notification through the same Discord/webhook path as a real alert, so the operator can
-   * confirm delivery is configured. Reports the outcome rather than assuming success.
-   */
-  webhookTest(): string {
-    const sent = this.huntNotifications().notify(
-      "system-error",
-      "Base Hunting Client — webhook test",
-      "If you can read this, hunt notifications reach this channel.",
-      { kind: "test" },
-    );
-    return sent ? "test notification sent (check the webhook channel)" : "test notification suppressed (disabled or cooling down)";
-  }
-
-  /**
-   * Start base hunting. Stops the terrain mapper first: both drive elytra flight, so only one flight
-   * controller may be active at a time. Returns a human-readable result.
-   */
-  startHunt(config?: Partial<HuntConfig>): string {
-    if (!this.bot?.entity) return "not connected";
-    if (this.mapper.isActive()) {
-      try {
-        this.mapper.stop();
-      } catch {
-        /* ignore */
-      }
-    }
-    const controller = this.huntController();
-    if (config) controller.setConfig(config);
-    controller.start();
-    this.startHuntTicker();
-    this.emit("status", this.getStatus());
-    return `base hunting started (${controller.status().mode})`;
-  }
-
-  stopHunt(): string {
-    if (!this.hunt) return "hunt not running";
-    this.hunt.stop();
-    this.stopHuntTicker();
-    this.emit("status", this.getStatus());
-    return "base hunting stopped";
-  }
-
-  pauseHunt(): string {
-    if (!this.hunt?.running) return "hunt not running";
-    this.hunt.pause();
-    return "base hunting paused";
-  }
-
-  resumeHunt(): string {
-    if (!this.hunt?.running) return "hunt not running";
-    this.hunt.resume();
-    return "base hunting resumed";
-  }
-
-  huntStatus(): HuntStatus | null {
-    return this.hunt?.status() ?? null;
-  }
-
-  huntDatabase(): HuntDatabase | null {
-    return this.huntDb;
-  }
-
-  /** Restock from the nearest ender chest using the configured categories. */
-  async huntRestock(): Promise<string> {
-    if (!this.hunt) return "hunt not running";
-    return this.hunt.restock();
-  }
-
-  setHuntConfig(partial: Partial<HuntConfig>): void {
-    this.huntController().setConfig(partial);
-    saveHuntConfig(`${this.config.host}:${this.config.port}`, this.huntController().getConfig());
-  }
-
-  /** The current hunt configuration (mode, spacing, thresholds, categories, …). */
-  huntConfig(): HuntConfig {
-    return this.huntController().getConfig();
-  }
-
-  /** Replace the custom waypoint route (chunk coordinates) and switch to `waypoints` mode. */
-  setHuntRoute(waypoints: Array<{ x: number; z: number }>): number {
-    const count = this.huntController().setWaypoints(waypoints);
-    saveHuntConfig(`${this.config.host}:${this.config.port}`, this.huntController().getConfig());
-    return count;
-  }
-
-  /** The current custom waypoint route (chunk coordinates). */
-  huntRoute(): Array<{ x: number; z: number }> {
-    return this.huntController().getWaypoints();
-  }
-
-  // --- Kit bot ------------------------------------------------------------------------------------
-
-  /**
-   * Lazily create the kit-bot controller. It reads the per-server config from `Settings/kitbot/<server>/`
-   * and routes every hand-out through normal `toss` calls.
-   */
-  private kitbotController(): KitBotController {
-    if (this.kitbot) return this.kitbot;
-    const server = `${this.config.host}:${this.config.port}`;
-    this.kitbot = new KitBotController(
-      {
-        requireBot: () => this.requireBot(),
-        chat: (message) => {
-          try {
-            this.bot?.chat(message);
-          } catch {
-            /* ignore */
-          }
-        },
-        selfUsername: () => this.getStatus().username || this.config.username || "",
-        onEvent: (event) => this.onKitBotEvent(event),
-      },
-      loadKitBotConfig(server),
-    );
-    return this.kitbot;
-  }
-
-  private onKitBotEvent(event: KitBotEvent): void {
-    if (event.kind === "served") {
-      log.info(`[kitbot] served ${event.kit} to ${event.username} (${event.detail ?? ""})`);
-    } else if (event.kind === "out-of-stock" || event.kind === "inventory-full") {
-      log.warn(`[kitbot] ${event.kind} for ${event.username}`);
-    }
-    this.emit("kitBotEvent", event);
-  }
-
-  /** Start serving kits. */
-  startKitBot(config?: Partial<KitBotConfig>): string {
-    if (!this.bot?.entity) return "not connected";
-    const controller = this.kitbotController();
-    if (config) {
-      controller.setConfig(config);
-      this.persistKitBotConfig();
-    }
-    this.kitbotActive = true;
-    this.emit("status", this.getStatus());
-    return `kit bot active — players type "${controller.getConfig().prefix}kit"`;
-  }
-
-  stopKitBot(): string {
-    if (!this.kitbotActive) return "kit bot not running";
-    this.kitbotActive = false;
-    this.emit("status", this.getStatus());
-    return "kit bot stopped";
-  }
-
-  kitBotStatus(): KitBotStatus | null {
-    return this.kitbot?.status() ?? null;
-  }
-
-  isKitBotActive(): boolean {
-    return this.kitbotActive;
-  }
-
-  kitBotConfig(): KitBotConfig {
-    return this.kitbotController().getConfig();
-  }
-
-  setKitBotConfig(patch: Partial<KitBotConfig>): KitBotConfig {
-    const config = this.kitbotController().setConfig(patch);
-    this.persistKitBotConfig();
-    return config;
-  }
-
-  private persistKitBotConfig(): void {
-    saveKitBotConfig(`${this.config.host}:${this.config.port}`, this.kitbotController().getConfig());
-  }
-
-  /** Hand a kit to `username` on demand (CLI / dashboard / Discord). */
-  async serveKit(username: string, kitName?: string): Promise<string> {
-    const controller = this.kitbotController();
-    const outcome = await controller.serve(username, kitName);
-    if (outcome.ok) return `served ${kitName ?? controller.getConfig().defaultKit} to ${username} (${outcome.dropped} items)`;
-    return `could not serve ${username}: ${outcome.message ?? outcome.reason ?? "unknown reason"}`;
-  }
-
-  /** What the bot is currently carrying for the default kit (or a named one). */
-  kitBotStock(kitName?: string): string {
-    return this.kitbotController().stockSummary(kitName);
-  }
-
-  /** Clears all per-player kit cooldowns. */
-  resetKitBotCooldowns(): string {
-    this.kitbotController().resetCooldowns();
-    return "kit cooldowns cleared";
-  }
-
-  /**
-   * Feeds a chat line to the kit bot. Called from the chat event; returns immediately when the bot is not
-   * active so an idle kit bot costs nothing.
-   */
-  private handleKitBotChat(raw: string): void {
-    if (!this.kitbotActive || !this.kitbot) return;
-    void this.kitbot.handleChat(raw).catch((error) => {
-      log.warn("[kitbot] chat handler failed", { err: error instanceof Error ? error.message : error });
-    });
-  }
-
-  /** Live elytra status for the currently equipped elytra and the best spare. */
-  elytraStatus(): { equipped: boolean; remaining: number; spares: number; bestSpareRemaining: number } | null {
-    if (!this.bot) return null;
-    const s = readElytraStatus(this.bot);
-    return {
-      equipped: s.equipped,
-      remaining: s.remaining,
-      spares: s.spares,
-      bestSpareRemaining: s.bestSpareRemaining,
-    };
-  }
-
-  /** Equip the healthiest viable spare elytra. Returns a human-readable result. */
-  async replaceElytra(minimum = 16): Promise<string> {
-    if (!this.bot) return "not connected";
-    const remaining = await equipBestElytra(this.bot, minimum);
-    return remaining >= 0
-      ? `equipped elytra with ${remaining} durability remaining`
-      : "no viable spare elytra found in inventory";
-  }
-
-  /** Items with the Mending enchantment and their remaining durability, most in need first. */
-  mendingStatus(): Array<{ slot: number; name: string; remaining: number; maxDamage: number }> {
-    if (!this.bot) return [];
-    return readMendingCandidates(this.bot).map((c) => ({
-      slot: c.slot,
-      name: c.name,
-      remaining: c.remaining,
-      maxDamage: c.maxDamage,
-    }));
-  }
-
-  /** The highest-priority damaged Mending item, or `null` when nothing needs repair. */
-  mendingTarget(): { slot: number; name: string; remaining: number; maxDamage: number; mustHold: boolean } | null {
-    if (!this.bot) return null;
-    const t = selectMendingTarget(this.bot);
-    return t
-      ? {
-          slot: t.candidate.slot,
-          name: t.candidate.name,
-          remaining: t.candidate.remaining,
-          maxDamage: t.candidate.maxDamage,
-          mustHold: t.mustHold,
-        }
-      : null;
-  }
-
-  /** Health, hunger, armour, totems, food, fireworks and inventory capacity. */
-  survivalStatus(): ReturnType<typeof readSurvivalSnapshot> {
-    if (!this.bot) return null;
-    return readSurvivalSnapshot(this.bot);
-  }
-
-  /** Locate an ender chest in the loaded surroundings without opening it. */
-  findEnderChest(radius = 48): { x: number; y: number; z: number; distance: number } | null {
-    if (!this.bot) return null;
-    const loc = findEnderChest(this.bot, radius);
-    if (!loc) return null;
-    return { x: loc.x, y: loc.y, z: loc.z, distance: loc.distance };
-  }
-
-  /**
-   * Open the nearest ender chest and read its contents, then close it. Never fabricates success: when no
-   * ender chest can be reached the reason is returned.
-   */
-  async echestStatus(radius = 48): Promise<{ ok: boolean; result: string; items?: number; categories?: number }> {
-    if (!this.bot) return { ok: false, result: "not connected" };
-    const loc = findEnderChest(this.bot, radius);
-    if (!loc) return { ok: false, result: `no ender chest within ${radius} blocks of the loaded area` };
-    const block = await openEnderChest(this.bot, loc);
-    if (!block) return { ok: false, result: "failed to open the ender chest (out of reach or blocked)" };
-    try {
-      const contents = readOpenContainer(this.bot);
-      if (!contents) return { ok: false, result: "opened but could not read the window contents" };
-      const names = new Set(contents.slots.map((s) => s.name).filter(Boolean));
-      return { ok: true, result: `read ${contents.slots.length} slots`, items: contents.slots.length, categories: names.size };
-    } finally {
-      closeEnderChest(this.bot);
-    }
-  }
-
-  private startHuntTicker(): void {
-    if (this.huntTick) return;
-    // 4 Hz: frequent enough to steer, cheap enough not to load the event loop.
-    this.huntTick = setInterval(() => {
-      if (this.huntTickBusy) return;
-      this.huntTickBusy = true;
-      try {
-        this.hunt?.tick();
-      } finally {
-        this.huntTickBusy = false;
-      }
-    }, 250);
-    this.huntTick.unref?.();
-  }
-
-  private stopHuntTicker(): void {
-    if (this.huntTick) {
-      clearInterval(this.huntTick);
-      this.huntTick = null;
-    }
   }
 
   async join(options: JoinOptions = {}): Promise<void> {
@@ -1036,22 +673,6 @@ export class FractalBot extends EventEmitter {
       enteredAt,
       entityIds: new Set([entityId]),
     });
-    // Persist the sighting for the base-hunting player database (server-keyed, de-duplicated).
-    if (this.huntDb && this.worldKind === "overworld") {
-      try {
-        const pos = this.bot?.entity?.position;
-        this.huntDb.recordPlayerSighting({
-          username,
-          x: Math.round(opts?.position?.x ?? pos?.x ?? 0),
-          y: Math.round(opts?.position?.y ?? pos?.y ?? 0),
-          z: Math.round(opts?.position?.z ?? pos?.z ?? 0),
-          dimension: this.bot?.game?.dimension || "overworld",
-          atMs: enteredAt,
-        });
-      } catch {
-        /* a sighting record must never break presence tracking */
-      }
-    }
     this.pushDetection({
       kind: "player_enter",
       label: username,
@@ -1388,13 +1009,7 @@ export class FractalBot extends EventEmitter {
         : undefined;
       const dist =
         bot.entity?.position && entity.position
-          ? Number(
-              bot.entity.position.distanceTo({
-                x: entity.position.x,
-                y: entity.position.y,
-                z: entity.position.z,
-              } as never).toFixed(1),
-            )
+          ? Number(bot.entity.position.distanceTo(entity.position).toFixed(1))
           : undefined;
       this.trackPlayerEnter(username, entity.id, { position: pos, distance: dist });
     };
@@ -2143,7 +1758,6 @@ export class FractalBot extends EventEmitter {
       this.lastChatAt = now;
       this.lastChat = text;
       this.emit("chat", { raw: text, timestamp: now });
-      this.handleKitBotChat(text);
     };
     bot.on("messagestr", (message) => emitChatLine(message));
     bot.on("message", (jsonMsg) => emitChatLine(jsonMsg));
@@ -2498,11 +2112,6 @@ export class FractalBot extends EventEmitter {
     log.info(summarizeDump(dump));
     if (dump.asciiMap) log.info(`\n${dump.asciiMap}`);
     this.emit("spawned", dump);
-    // Resume an interrupted hunt once we are back on the main world (dimension changes, deaths, reconnects).
-    if (this.hunt?.running && this.hunt.isPaused && this.worldKind === "overworld") {
-      this.hunt.resume();
-      this.startHuntTicker();
-    }
   }
 
   private refreshWorld(reason: string): void {
@@ -2701,18 +2310,6 @@ export class FractalBot extends EventEmitter {
     this.navigator?.stop();
     this.clearDetectionRecheck();
     this.clearPlayerPresence(false);
-    // Pause hunting (not stop): the controller and its database survive a reconnect so an interrupted route
-    // resumes where it left off instead of losing its progress.
-    if (this.hunt?.running) {
-      try {
-        this.hunt.pause();
-      } catch {
-        /* ignore */
-      }
-      this.stopHuntTicker();
-    }
-    // Pause the kit bot too: serving kits needs a live entity and inventory.
-    this.kitbotActive = false;
     this.auth?.destroy();
     this.auth = null;
     this.navigator = null;
