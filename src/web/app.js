@@ -3521,311 +3521,6 @@ async function refreshDetection() {
   }
 }
 
-/** Pull the live hunt status plus the stash and player databases for the Hunt panel. */
-async function refreshHunt() {
-  if (!selectedBotId && !status?.connected) return;
-  const forEl = document.getElementById("hunt-for");
-  if (forEl) forEl.textContent = selectedBotId ? `Profile: ${selectedBotId}` : "Live bot";
-  try {
-    const body = await rpc("huntStatus", {});
-    if (!body.ok) return;
-    const s = body.data;
-    const set = (id, text) => {
-      const el = document.getElementById(id);
-      if (el) el.textContent = text;
-    };
-    if (!s) {
-      set("hunt-phase", "idle");
-      set("hs-phase", "not started");
-      return;
-    }
-    const flight = s.flight || {};
-    set("hunt-phase", s.paused ? "paused" : s.active ? s.phase : "idle");
-    set("hs-phase", s.paused ? "paused" : s.active ? s.phase : "stopped");
-    set("hs-mode", s.mode || "—");
-    set("hs-flight", flight.state || "—");
-    set("hs-elytra", flight.elytraRemaining >= 0 ? `${flight.elytraRemaining} left` : "none");
-    set("hs-spares", flight.elytraSpares ?? "—");
-    set("hs-target", s.target ? `${Math.round(s.target.x)},${Math.round(s.target.y)},${Math.round(s.target.z)}` : "—");
-    set("hs-waypoint", `${s.waypointIndex ?? 0} / ${s.waypointsTotal ?? 0}`);
-    set("hs-explored", s.exploredChunks ?? 0);
-    set("hs-stashes", s.stashes ?? 0);
-    set("hs-players", s.players ?? 0);
-    const sv = s.survival || null;
-    set("hs-health", sv ? sv.health : "—");
-    set("hs-food", sv ? sv.food : "—");
-    set("hs-totems", sv ? sv.totems : "—");
-    set("hs-fireworks", sv ? sv.fireworks : "—");
-    set("hs-free", sv ? sv.freeSlots : "—");
-    const notes = document.getElementById("hunt-notes");
-    if (notes) notes.textContent = (s.notes || []).join(" · ") || "No notes.";
-  } catch {
-    /* ignore */
-  }
-  try {
-    const stashes = await rpc("stashNearby", {});
-    if (stashes.ok && stashes.data) {
-      const rows = stashes.data.stashes || [];
-      const count = document.getElementById("hunt-stash-count");
-      if (count) count.textContent = `${stashes.data.total ?? rows.length} total`;
-      const list = document.getElementById("hunt-stash-list");
-      if (list) {
-        list.replaceChildren();
-        for (const row of rows.slice(0, 20)) {
-          const li = document.createElement("li");
-          li.textContent = `${row.tier} · ${row.score} · ${row.x},${row.z} · ${row.distance ?? "?"}b`;
-          list.append(li);
-        }
-        if (!rows.length) {
-          const li = document.createElement("li");
-          li.className = "mute";
-          li.textContent = "No stashes recorded yet.";
-          list.append(li);
-        }
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-  try {
-    const players = await rpc("playerList", {});
-    if (players.ok && players.data) {
-      const rows = players.data.players || [];
-      const count = document.getElementById("hunt-player-count");
-      if (count) count.textContent = `${players.data.total ?? rows.length} total`;
-      const list = document.getElementById("hunt-player-list");
-      if (list) {
-        list.replaceChildren();
-        for (const row of rows.slice(0, 20)) {
-          const li = document.createElement("li");
-          const seen = row.lastSeenMs ? new Date(row.lastSeenMs).toLocaleString() : "?";
-          li.textContent = `${row.username} · ${row.sightings}× · ${row.lastX},${row.lastZ} · ${seen}`;
-          list.append(li);
-        }
-        if (!rows.length) {
-          const li = document.createElement("li");
-          li.className = "mute";
-          li.textContent = "No players recorded yet.";
-          list.append(li);
-        }
-      }
-    }
-  } catch {
-    /* ignore */
-  }
-}
-
-function wireHuntButtons() {
-  const run = (action, extra) =>
-    rpc(action, extra).then(() => refreshHunt()).catch(() => {});
-  document.getElementById("hunt-start")?.addEventListener("click", () => {
-    const mode = document.getElementById("hunt-mode")?.value || "spiral";
-    void run("huntStart", { huntConfig: { mode } });
-  });
-  document.getElementById("hunt-pause")?.addEventListener("click", () => void run("huntPause"));
-  document.getElementById("hunt-resume")?.addEventListener("click", () => void run("huntResume"));
-  document.getElementById("hunt-stop")?.addEventListener("click", () => void run("huntStop"));
-  document.getElementById("hunt-restock")?.addEventListener("click", () => void run("huntRestock"));
-
-  const out = document.getElementById("hunt-equipment-output");
-  const setOut = (text) => {
-    if (out) out.textContent = text;
-  };
-  const show = async (action, format) => {
-    setOut("…");
-    try {
-      const body = await rpc(action, {});
-      if (!body.ok) {
-        setOut(`error: ${body.error || "request failed"}`);
-        return;
-      }
-      setOut(format(body.data));
-    } catch (e) {
-      setOut(`error: ${e?.message || e}`);
-    }
-  };
-
-  document.getElementById("hunt-elytra-status")?.addEventListener("click", () =>
-    void show("elytraStatus", (d) =>
-      d ? `equipped=${d.equipped} remaining=${d.remaining} spares=${d.spares} bestSpare=${d.bestSpareRemaining}` : "no elytra data (not connected)",
-    ),
-  );
-  document.getElementById("hunt-elytra-replace")?.addEventListener("click", () =>
-    void show("elytraReplace", (d) => `${d?.result ?? "no result"}\n${JSON.stringify(d?.status ?? {}, null, 2)}`),
-  );
-  document.getElementById("hunt-mending")?.addEventListener("click", () =>
-    void show("mendingStatus", (d) => {
-      const rows = d?.candidates || [];
-      const target = d?.target ? `target: ${d.target.name} slot ${d.target.slot} (${d.target.remaining}/${d.target.maxDamage})` : "target: none";
-      return [target, ...rows.map((c) => `${c.name} slot ${c.slot} ${c.remaining}/${c.maxDamage}`)].join("\n");
-    }),
-  );
-  document.getElementById("hunt-survival")?.addEventListener("click", () =>
-    void show("survivalStatus", (d) => (d ? JSON.stringify(d, null, 2) : "not connected")),
-  );
-  document.getElementById("hunt-echest")?.addEventListener("click", () =>
-    void show("echestStatus", (d) => (d ? `${d.ok ? "ok" : "failed"}: ${d.result}${d.items != null ? ` (${d.items} slots)` : ""}` : "no result")),
-  );
-  document.getElementById("hunt-webhook")?.addEventListener("click", () =>
-    void show("webhookTest", (d) => d?.result || "no result"),
-  );
-
-  const routeOut = document.getElementById("hunt-route-hint");
-  const setRouteOut = (text) => {
-    if (routeOut) routeOut.textContent = text;
-  };
-  document.getElementById("hunt-route-set")?.addEventListener("click", async () => {
-    const raw = document.getElementById("hunt-route-input")?.value || "";
-    const waypoints = [];
-    for (const token of raw.split(/[\s;]+/)) {
-      const m = token.match(/^(-?\d+)[,:](-?\d+)$/);
-      if (m) waypoints.push({ x: Number(m[1]), z: Number(m[2]) });
-    }
-    if (!waypoints.length) {
-      setRouteOut("No waypoints parsed — use `x,z` pairs.");
-      return;
-    }
-    try {
-      const body = await rpc("huntRouteSet", { waypoints });
-      setRouteOut(body.ok ? `Route set: ${body.data?.count ?? waypoints.length} waypoints.` : `error: ${body.error}`);
-      void refreshHunt();
-    } catch (e) {
-      setRouteOut(`error: ${e?.message || e}`);
-    }
-  });
-  document.getElementById("hunt-route-list")?.addEventListener("click", async () => {
-    try {
-      const body = await rpc("huntRouteList", {});
-      const route = body.ok ? body.data?.route || [] : [];
-      setRouteOut(route.length ? route.map((w) => `${w.x},${w.z}`).join("  ") : "Route is empty.");
-    } catch (e) {
-      setRouteOut(`error: ${e?.message || e}`);
-    }
-  });
-  document.getElementById("hunt-route-clear")?.addEventListener("click", async () => {
-    try {
-      await rpc("huntRouteSet", { waypoints: [] });
-      await rpc("huntConfig", { huntConfig: { mode: "spiral" } });
-      setRouteOut("Route cleared — back to spiral mode.");
-      void refreshHunt();
-    } catch (e) {
-      setRouteOut(`error: ${e?.message || e}`);
-    }
-  });
-}
-wireHuntButtons();
-
-// --- Kit bot -------------------------------------------------------------------------------------
-async function refreshKitBot() {
-  if (!selectedBotId && !status?.connected) return;
-  const forEl = document.getElementById("kitbot-for");
-  if (forEl) forEl.textContent = selectedBotId ? `Profile: ${selectedBotId}` : "Live bot";
-  const set = (id, text) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = text;
-  };
-  try {
-    const body = await rpc("kitBotStatus", {});
-    if (!body.ok) return;
-    const data = body.data || {};
-    const cfg = body.data?.config || {};
-    const s = data.status || {};
-    set("kitbot-state", data.active ? "active" : "stopped");
-    const pill = document.getElementById("kitbot-state");
-    if (pill) pill.setAttribute("data-tone", data.active ? "live" : "neutral");
-    set("kb-active", data.active ? "yes" : "no");
-    set("kb-prefix", cfg.prefix ?? "—");
-    set("kb-cooldown", cfg.cooldownMs != null ? `${cfg.cooldownMs / 1000}s` : "—");
-    set("kb-distance", cfg.maxDistance === 0 ? "anywhere" : cfg.maxDistance ?? "—");
-    set("kb-kits", (cfg.kits || []).map((k) => k.name).join(", ") || "—");
-    set("kb-served", s.servedTotal ?? 0);
-    set("kb-perminute", s.servedLastMinute ?? 0);
-    set("kb-oncooldown", s.playersOnCooldown ?? 0);
-    // Seed the settings form only when the tab is freshly shown (avoid clobbering typing).
-    const prefixEl = document.getElementById("kitbot-prefix");
-    if (prefixEl && document.activeElement !== prefixEl) {
-      prefixEl.value = cfg.prefix ?? "";
-      const cd = document.getElementById("kitbot-cooldown");
-      if (cd) cd.value = cfg.cooldownMs != null ? String(cfg.cooldownMs / 1000) : "";
-      const dist = document.getElementById("kitbot-distance");
-      if (dist) dist.value = cfg.maxDistance != null ? String(cfg.maxDistance) : "";
-      const ann = document.getElementById("kitbot-announce");
-      if (ann) ann.checked = Boolean(cfg.announce);
-      const walk = document.getElementById("kitbot-walk");
-      if (walk) walk.checked = Boolean(cfg.walkToPlayer);
-      const bl = document.getElementById("kitbot-blacklist");
-      if (bl && document.activeElement !== bl) bl.value = (cfg.blacklist || []).join(", ");
-    }
-  } catch {
-    /* ignore */
-  }
-}
-
-function wireKitBotButtons() {
-  const out = document.getElementById("kitbot-output");
-  const setOut = (text) => {
-    if (out) out.textContent = text;
-  };
-  const run = (action, extra) =>
-    rpc(action, extra)
-      .then((body) => {
-        if (!body.ok) setOut(`error: ${body.error || "request failed"}`);
-        else if (body.data?.result) setOut(body.data.result);
-        return refreshKitBot();
-      })
-      .catch((e) => setOut(`error: ${e?.message || e}`));
-
-  document.getElementById("kitbot-start")?.addEventListener("click", () => {
-    const prefix = document.getElementById("kitbot-prefix")?.value || undefined;
-    void run("kitBotStart", { kitConfig: prefix ? { prefix } : undefined });
-  });
-  document.getElementById("kitbot-stop")?.addEventListener("click", () => void run("kitBotStop"));
-  document.getElementById("kitbot-status")?.addEventListener("click", () => void refreshKitBot());
-  document.getElementById("kitbot-reset")?.addEventListener("click", () => void run("kitBotResetCooldowns"));
-  document.getElementById("kitbot-stock")?.addEventListener("click", async () => {
-    setOut("…");
-    try {
-      const body = await rpc("kitBotStock", {});
-      setOut(body.ok ? body.data?.stock || "no stock" : `error: ${body.error}`);
-    } catch (e) {
-      setOut(`error: ${e?.message || e}`);
-    }
-  });
-
-  document.getElementById("kitbot-save")?.addEventListener("click", () => {
-    const kitConfig = {
-      prefix: document.getElementById("kitbot-prefix")?.value || "!",
-      cooldownMs: Math.max(0, Number(document.getElementById("kitbot-cooldown")?.value || 0)) * 1000,
-      maxDistance: Math.max(0, Number(document.getElementById("kitbot-distance")?.value || 0)),
-      announce: Boolean(document.getElementById("kitbot-announce")?.checked),
-      walkToPlayer: Boolean(document.getElementById("kitbot-walk")?.checked),
-      blacklist: (document.getElementById("kitbot-blacklist")?.value || "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean),
-    };
-    void run("kitBotConfig", { kitConfig });
-  });
-
-  document.getElementById("kitbot-give")?.addEventListener("click", async () => {
-    const username = document.getElementById("kitbot-give-player")?.value || "";
-    const kit = document.getElementById("kitbot-give-kit")?.value || undefined;
-    if (!username) {
-      setOut("Enter a player name.");
-      return;
-    }
-    setOut("…");
-    try {
-      const body = await rpc("kitBotServe", { username, kit });
-      setOut(body.ok ? body.data?.result || "served" : `error: ${body.error}`);
-      void refreshKitBot();
-    } catch (e) {
-      setOut(`error: ${e?.message || e}`);
-    }
-  });
-}
-wireKitBotButtons();
-
 document.getElementById("detect-clear")?.addEventListener("click", () => {
   detectionEvents.length = 0;
   detectionSeenIds.clear();
@@ -3861,8 +3556,6 @@ void refreshDetection();
 setInterval(() => {
   if (document.hidden) return;
   if (activeDashboardTab() === "detect") void refreshDetection();
-  if (activeDashboardTab() === "hunt") void refreshHunt();
-  if (activeDashboardTab() === "kitbot") void refreshKitBot();
 }, 5000);
 
 // Status HTTP backup — WS already streams status. Keep this slow on mobile.
@@ -5059,20 +4752,6 @@ const MODULES = [
     icon: "✉",
     keywords: ["announce", "announcement", "chat", "spam", "timed"],
   },
-  {
-    id: "hunt",
-    name: "Hunt",
-    desc: "Base hunting, stashes, players",
-    icon: "⛏",
-    keywords: ["hunt", "base", "stash", "elytra", "player", "explore", "bh", "loot", "database"],
-  },
-  {
-    id: "kitbot",
-    name: "Kit Bot",
-    desc: "Serve kits on chat",
-    icon: "🎁",
-    keywords: ["kit", "kitbot", "give", "serve", "drop", "prefix", "handout"],
-  },
 ];
 /** Utilities reachable from the top bar (not sidebar modules) */
 const UTILITIES = [
@@ -5184,8 +4863,6 @@ function activateTab(name) {
     requestAnimationFrame(() => window.fractalSurvey?.resize?.());
   }
   if (tabName === "detect") void refreshDetection();
-  if (tabName === "hunt") void refreshHunt();
-  if (tabName === "kitbot") void refreshKitBot();
   if (tabName === "settings") {
     void loadSettingsForm(0);
     const bot = (fleetState?.bots || []).find((b) => b.id === selectedBotId);
@@ -5307,7 +4984,7 @@ document.getElementById("sidebar-search")?.addEventListener("keydown", (e) => {
 renderSideNav("");
 
 const hashTab = (location.hash || "").replace(/^#/, "");
-const valid = new Set(["play", "map", "detect", "announce", "hunt", "kitbot", "settings", "log"]);
+const valid = new Set(["play", "map", "detect", "announce", "settings", "log"]);
 const legacy = {
   home: "play",
   profiles: "play",

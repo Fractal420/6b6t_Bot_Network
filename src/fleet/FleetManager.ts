@@ -193,7 +193,6 @@ export class FleetManager extends EventEmitter {
       "worldKind",
       "error",
       "msaCode",
-      "huntNotification",
     ] as const) {
       forward(e);
     }

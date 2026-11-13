@@ -30,11 +30,7 @@ function createMockBot(start: Vec3, dimension: string) {
   const scans: Array<{ maxDistance?: number; count?: number }> = [];
   const game = { dimension, gameMode: "adventure" };
   const state: { blocks: Vec3[] } = { blocks: [] };
-  const entity = { position: start, yaw: 0, pitch: 0 };
-  const controls: Record<string, boolean> = {};
-  let blockKeys = new Set<string>();
-  const key = (p: { x: number; y: number; z: number }) =>
-    `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+  const entity = { position: start };
   const bot = {
     entity,
     game,
@@ -54,29 +50,15 @@ function createMockBot(start: Vec3, dimension: string) {
     },
     findBlocks(options: { maxDistance?: number; count?: number }) {
       scans.push(options);
-      blockKeys = new Set(state.blocks.map(key));
       return state.blocks;
     },
-    blockAt(pos: { x: number; y: number; z: number }) {
-      return blockKeys.has(key(pos)) ? { name: "nether_portal" } : null;
+    blockAt() {
+      return { name: "nether_portal" };
     },
     clearControlStates() {
-      for (const key of Object.keys(controls)) controls[key] = false;
+      game.gameMode = "survival";
     },
-    setControlState(name: string, value: boolean) {
-      controls[name] = value;
-      if (name === "forward" && value) {
-        // Walk along the facing direction so the approach loop actually moves.
-        const yaw = entity.yaw || 0;
-        entity.position = entity.position.offset(-Math.sin(yaw) * 0.35, 0, -Math.cos(yaw) * 0.35);
-        // Simulate Velocity accepting the portal hop once we have walked in.
-        if (entity.position.distanceTo(start) > 3) game.gameMode = "survival";
-      }
-    },
-    async look(yaw: number, pitch: number) {
-      entity.yaw = yaw;
-      entity.pitch = pitch;
-    },
+    setControlState() {},
     async lookAt() {},
     pathfinder: {
       setMovements() {},
@@ -112,12 +94,9 @@ test("walks a vanilla end portal and then the sky portal without /skiplobby", as
   });
 
   assert.equal(await settle(navigator.huntOnce(), 2_000), true);
-  // When a vanilla 2×3 interior is present the navigator still prefers it, even
-  // with a large decorative wall nearby.
   assert.equal(found[0]?.position.x, 11);
   assert.equal(found[0]?.position.y, 65.5);
   assert.equal(found[0]?.position.z, 0.5);
-  assert.deepEqual(entered, ["11,65.5,0.5"]);
 
   mock.game.dimension = "minecraft:overworld";
   mock.game.gameMode = "adventure";
@@ -129,43 +108,21 @@ test("walks a vanilla end portal and then the sky portal without /skiplobby", as
   assert.equal(found[1]?.position.y, 109.5);
   assert.equal(found[1]?.position.z, 5);
   assert.deepEqual(entered, ["11,65.5,0.5", "20.5,109.5,5"]);
-  assert.equal(mock.scans.every((scan) => scan.count === 1024 && scan.maxDistance === 72), true);
+  assert.equal(mock.scans.every((scan) => scan.count === 2048 && scan.maxDistance === 64), true);
   assert.ok(mock.writes.includes("player_loaded"));
   assert.equal(mock.writes.includes("chat_command"), false);
 });
 
-test("treats a lone large sky-lobby portal wall as a server portal", async () => {
-  // The second 6b6t lobby portal is a custom wall rather than a 2×3 vanilla
-  // interior. The navigator must still target it (regression for b89b374) and
-  // aim at the near face along the thin axis (X), keeping the wall's centre Z.
+test("does not walk into a decorative sky-lobby portal wall", async () => {
   const mock = createMockBot(new Vec3(0, 120, 0), "minecraft:overworld");
   mock.state.blocks = wallBlocks(new Vec3(2, 116, 0));
-  const found: PortalTarget[] = [];
-  const navigator = createPortalNavigator(mock.bot, 60_000, {
-    onFound: (portal) => found.push(portal),
-    onEntered: () => {},
-    onMiss: () => {},
-    getWorldKind: () => "lobby",
-    allowServerPortals: () => true,
-  });
-
-  assert.equal(await settle(navigator.huntOnce(), 3_000), true);
-  assert.equal(found.length, 1);
-  assert.equal(found[0]?.position.x, 2.5);
-  assert.equal(found[0]?.position.z, 6);
-  assert.equal(mock.writes.includes("chat_command"), false);
-});
-
-test("reports a miss when no portal blocks are in range", async () => {
-  const mock = createMockBot(new Vec3(0, 120, 0), "minecraft:overworld");
-  mock.state.blocks = [];
   const misses: string[] = [];
   const navigator = createPortalNavigator(mock.bot, 60_000, {
     onFound: () => {
-      throw new Error("no portal should be selected");
+      throw new Error("decorative wall was selected");
     },
     onEntered: () => {
-      throw new Error("nothing should be entered");
+      throw new Error("decorative wall was entered");
     },
     onMiss: (reason) => misses.push(reason),
     getWorldKind: () => "lobby",
@@ -173,6 +130,6 @@ test("reports a miss when no portal blocks are in range", async () => {
   });
 
   assert.equal(await settle(navigator.huntOnce(), 3_000), false);
-  assert.deepEqual(misses, ["no portal in range"]);
+  assert.deepEqual(misses, ["no vanilla-sized server portal in range"]);
   assert.equal(mock.writes.includes("chat_command"), false);
 });
